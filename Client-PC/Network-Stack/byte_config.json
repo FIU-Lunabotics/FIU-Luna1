@@ -1,0 +1,37 @@
+{
+  "output_size": 6,
+  "bytes": [
+    {
+      "type": "bits",
+      "bits": [
+        {"pos": 0, "field": "W"},
+        {"pos": 1, "field": "E"},
+        {"pos": 2, "field": "S"}
+      ]
+    },
+    {
+      "type": "field",
+      "field": "LjoyX"
+    },
+    {
+      "type": "field",
+      "field": "LjoyY"
+    },
+    {
+      "type": "field",
+      "field": "RjoyY"
+    },
+    {
+      "type": "field",
+      "field": "RT"
+    },
+    {
+      "type": "bits",
+      "bits": [
+        {"pos": 5, "field": "LB"},
+        {"pos": 6, "field": "RB"},
+        {"pos": 7, "field": "N"}
+      ]
+    }
+  ]
+}
