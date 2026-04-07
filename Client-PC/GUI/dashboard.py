@@ -182,8 +182,10 @@ def verify_packet(packet: bytes):
 
 
 def display_mode_label(rover_state, rover_request):
-    if is_fresh_state_info(rover_state):
-        return rover_state.get("state", "UNKNOWN")
+    if rover_state and rover_state.get("valid"):
+        if is_fresh_state_info(rover_state):
+            return rover_state.get("state", "UNKNOWN")
+        return f"{rover_state.get('state', 'UNKNOWN')} (last known)"
     if is_fresh_state_info(rover_request):
         return f"{rover_request.get('state', 'UNKNOWN')} (pending)"
     return "UNKNOWN"
@@ -879,13 +881,17 @@ def update_ui(_, active_tab):
                                     style={"fontFamily": "monospace"},
                                 ),
                                 html.Div(
-                                    f"Rover state: {rover_state.get('state', 'unknown') if is_fresh_state_info(rover_state) else 'unknown'}",
+                                    (
+                                        f"Rover state: {rover_state.get('state', 'unknown')}"
+                                        if rover_state and rover_state.get("valid")
+                                        else "Rover state: unknown"
+                                    ),
                                     style={"fontFamily": "monospace", "marginTop": "8px"},
                                 ),
                                 html.Div(
                                     (
                                         f"Rover state age: {state_age_text(rover_state.get('timestamp'))}"
-                                        if is_fresh_state_info(rover_state)
+                                        if rover_state and rover_state.get("valid")
                                         else "Rover state age: unknown"
                                     ),
                                     style={"fontFamily": "monospace"},
