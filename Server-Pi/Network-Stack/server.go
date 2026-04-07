@@ -17,6 +17,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -183,6 +184,22 @@ type SerialManager struct {
 type StateSwitchTracker struct {
 	selectHeldSince time.Time
 	requestIssued   bool
+}
+
+type RoverStateSnapshot struct {
+	Valid     bool   `json:"valid"`
+	State     string `json:"state,omitempty"`
+	Timestamp int64  `json:"timestamp,omitempty"`
+	Source    string `json:"source,omitempty"`
+	Seq       string `json:"seq,omitempty"`
+	Fresh     bool   `json:"fresh"`
+	Error     string `json:"error,omitempty"`
+}
+
+type RoverStateResponse struct {
+	ServerTimeMs int64              `json:"server_time_ms"`
+	RoverState   RoverStateSnapshot `json:"rover_state"`
+	RoverRequest RoverStateSnapshot `json:"rover_request"`
 }
 
 // ============================================================================
@@ -635,6 +652,64 @@ func readRoverState() (string, int64, bool) {
 	return stateName, stateTimestamp, true
 }
 
+func readRoverStateSnapshot(path string) RoverStateSnapshot {
+	rawData, err := os.ReadFile(path)
+	if err != nil {
+		return RoverStateSnapshot{Valid: false, Fresh: false, Error: err.Error()}
+	}
+
+	cleanData := strings.TrimSpace(string(rawData))
+	if cleanData == "" {
+		return RoverStateSnapshot{Valid: false, Fresh: false, Error: "empty"}
+	}
+
+	stateParts := strings.Split(cleanData, ",")
+	if len(stateParts) < 2 {
+		return RoverStateSnapshot{Valid: false, Fresh: false, Error: "invalid format"}
+	}
+
+	stateName := strings.TrimSpace(stateParts[0])
+	timestamp, err := strconv.ParseInt(strings.TrimSpace(stateParts[1]), 10, 64)
+	if err != nil || timestamp <= 0 {
+		return RoverStateSnapshot{Valid: false, Fresh: false, Error: "invalid timestamp"}
+	}
+
+	snapshot := RoverStateSnapshot{
+		Valid:     true,
+		State:     stateName,
+		Timestamp: timestamp,
+		Fresh:     newRoverState(timestamp),
+	}
+	if len(stateParts) > 2 {
+		snapshot.Source = strings.TrimSpace(stateParts[2])
+	}
+	if len(stateParts) > 3 {
+		snapshot.Seq = strings.TrimSpace(stateParts[3])
+	}
+	return snapshot
+}
+
+func roverStateHTTPHandler(w http.ResponseWriter, _ *http.Request) {
+	response := RoverStateResponse{
+		ServerTimeMs: time.Now().UnixMilli(),
+		RoverState:   readRoverStateSnapshot(roverStateFilePath),
+		RoverRequest: readRoverStateSnapshot(roverStateRequestFilePath),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func startRoverStateHTTPServer(addr string) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/rover/state", roverStateHTTPHandler)
+	go func() {
+		log.Printf("Rover state HTTP endpoint on %s/rover/state", addr)
+		if err := http.ListenAndServe(addr, mux); err != nil {
+			log.Printf("Rover state HTTP server stopped: %v", err)
+		}
+	}()
+}
+
 func controllerRequestedMode(state *ControllerState) (string, bool) {
 	switch {
 	case state.North != 0:
@@ -862,6 +937,7 @@ func handleClient(conn net.Conn, formatter *ByteFormatter, serialMgr *SerialMana
 
 func main() {
 	port := flag.Int("port", 8080, "Server port")
+	statePort := flag.Int("state-port", 8081, "HTTP port for rover state endpoint")
 	public := flag.Bool("public", false, "Allow external connections")
 	configFile := flag.String("config", "", "Byte mapping config file")
 	serialCRC := flag.Bool("serial-crc", false, "Append CRC32 to bytes sent over serial")
@@ -887,8 +963,10 @@ func main() {
 
 	// Start TCP listener
 	addr := fmt.Sprintf("localhost:%d", *port)
+	stateAddr := fmt.Sprintf("localhost:%d", *statePort)
 	if *public {
 		addr = fmt.Sprintf("0.0.0.0:%d", *port)
+		stateAddr = fmt.Sprintf("0.0.0.0:%d", *statePort)
 	}
 
 	listener, err := net.Listen("tcp", addr)
@@ -898,6 +976,7 @@ func main() {
 	defer listener.Close()
 
 	log.Printf("Server listening on %s", addr)
+	startRoverStateHTTPServer(stateAddr)
 	serialMgr := NewSerialManager(*serialDevice, *serialCRC, *serialAck)
 	defer serialMgr.Close()
 

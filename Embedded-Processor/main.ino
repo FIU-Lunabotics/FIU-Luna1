@@ -3,21 +3,28 @@
 Servo esc1;
 Servo esc2;
 
-constexpr byte START_BYTE = 0b10101000;
-constexpr byte END_BYTE = 0b00010101;
+constexpr byte START_BYTE = 0xFF;
+constexpr byte END_BYTE = 0xFF;
 constexpr byte start_byte_bm = 0b11111111;
 constexpr byte end_byte_bm = 0b11111111;
 
-constexpr uint8_t PACKET_SIZE = 5;        // start + 4 data bytes
-constexpr uint8_t PACKET_TOTAL_SIZE = 6;  // start + 4 data bytes + end
+constexpr uint8_t PACKET_SIZE = 7;        // start + 6 data bytes
+constexpr uint8_t PACKET_TOTAL_SIZE = 8;  // start + 6 data bytes + end
 constexpr size_t BUFFER_SIZE = 64;
+
+constexpr byte DXP_POS_MASK = 1 << 2;
+constexpr byte DXP_NEG_MASK = 1 << 3;
+constexpr byte DYP_NEG_MASK = 1 << 4;
+constexpr byte DYP_POS_MASK = 1 << 5;
 
 struct ControlPacket {
   byte start_byte = 0;
-  byte joy_left_x = 0;
+  byte primary_buttons = 0;
+  byte secondary_buttons = 0;
   byte joy_left_y = 0;
   byte joy_right_y = 0;
-  byte trigger = 0;
+  byte trigger_left = 0;
+  byte trigger_right = 0;
   byte end_byte = 0;
 
   byte barr[BUFFER_SIZE] = {0};
@@ -97,13 +104,31 @@ struct ControlPacket {
     sizeOfBarr = remaining;
 
     this->start_byte = tempBarr[0];
-    this->joy_left_x = tempBarr[1];
-    this->joy_left_y = tempBarr[2];
-    this->joy_right_y = tempBarr[3];
-    this->trigger = tempBarr[4];
-    this->end_byte = tempBarr[5];
+    this->primary_buttons = tempBarr[1];
+    this->secondary_buttons = tempBarr[2];
+    this->joy_left_y = tempBarr[3];
+    this->joy_right_y = tempBarr[4];
+    this->trigger_left = tempBarr[5];
+    this->trigger_right = tempBarr[6];
+    this->end_byte = tempBarr[7];
 
     return result;
+  }
+
+  bool dPadRight() const {
+    return (secondary_buttons & DXP_POS_MASK) != 0;
+  }
+
+  bool dPadLeft() const {
+    return (secondary_buttons & DXP_NEG_MASK) != 0;
+  }
+
+  bool dPadUp() const {
+    return (secondary_buttons & DYP_NEG_MASK) != 0;
+  }
+
+  bool dPadDown() const {
+    return (secondary_buttons & DYP_POS_MASK) != 0;
   }
 };
 
@@ -121,8 +146,13 @@ int dir1 = 6;
 int dir2 = 7;
 // int potPin = A0;
 
-int throttleMin = 0;   // ESC minimum throttle
-int throttleMax = 2000;   // ESC maximum throttle
+int escPulseMin = 1000;
+int escPulseNeutral = 1500;
+int escPulseMax = 2000;
+
+int axisToPulse(byte axisValue) {
+  return map(axisValue, 0, 255, escPulseMin, escPulseMax);
+}
 
 void setup() {
   // pinMode(button1,INPUT);
@@ -135,35 +165,47 @@ void setup() {
   pinMode(dir1, OUTPUT);
   pinMode(dir2, OUTPUT);
 
-  esc1.attach(escPin1, throttleMin, throttleMax);
-  esc2.attach(escPin2, throttleMin, throttleMax);
+  esc1.attach(escPin1, escPulseMin, escPulseMax);
+  esc2.attach(escPin2, escPulseMin, escPulseMax);
 
   // ---- ARM ESC ----
   Serial.println("Arming ESC...");
-  esc1.writeMicroseconds(throttleMin);
-  esc2.writeMicroseconds(throttleMin);
-  delay(2000);  // most ESCs need 2 seconds of minimum throttle
+  // The server now sends centered joystick values around 1500 us.
+  esc1.writeMicroseconds(escPulseNeutral);
+  esc2.writeMicroseconds(escPulseNeutral);
+  delay(2000);
   Serial.println("ESC Ready");
 }
 
 void loop() {
   if (Serial.available() >= PACKET_TOTAL_SIZE && controllerPacket.update() > 0) {
-    int throttle = map(controllerPacket.joy_left_y, 0, 255, 1000, 2000);
-    esc1.writeMicroseconds(throttle);
-    esc2.writeMicroseconds(throttle);
+    int leftPulse = axisToPulse(controllerPacket.joy_left_y);
+    int rightPulse = axisToPulse(controllerPacket.joy_right_y);
+    esc1.writeMicroseconds(leftPulse);
+    esc2.writeMicroseconds(rightPulse);
 
-    digitalWrite(linAcc1, controllerPacket.joy_right_y > 128 ? HIGH : LOW);
-    digitalWrite(linAcc2, controllerPacket.joy_right_y > 128 ? HIGH : LOW);
-    digitalWrite(dir1, controllerPacket.trigger > 128 ? HIGH : LOW);
-    digitalWrite(dir2, controllerPacket.trigger > 128 ? HIGH : LOW);
+    // Keep auxiliary outputs simple and deterministic until their final mapping
+    // is locked in with the embedded pinout and actuator expectations.
+    digitalWrite(linAcc1, controllerPacket.dPadUp() ? HIGH : LOW);
+    digitalWrite(linAcc2, controllerPacket.dPadDown() ? HIGH : LOW);
+    digitalWrite(dir1, controllerPacket.dPadRight() ? HIGH : LOW);
+    digitalWrite(dir2, controllerPacket.dPadLeft() ? HIGH : LOW);
 
-    Serial.print("Throttle: ");
-    Serial.print(throttle);
-    Serial.print("  LJoyX: ");
-    Serial.print(controllerPacket.joy_left_x);
-    Serial.print("  RJoyY: ");
-    Serial.print(controllerPacket.joy_right_y);
+    Serial.print("LeftPulse: ");
+    Serial.print(leftPulse);
+    Serial.print("  RightPulse: ");
+    Serial.print(rightPulse);
+    Serial.print("  LT: ");
+    Serial.print(controllerPacket.trigger_left);
     Serial.print("  RT: ");
-    Serial.println(controllerPacket.trigger);
+    Serial.print(controllerPacket.trigger_right);
+    Serial.print("  DPad(U,D,L,R): ");
+    Serial.print(controllerPacket.dPadUp());
+    Serial.print(",");
+    Serial.print(controllerPacket.dPadDown());
+    Serial.print(",");
+    Serial.print(controllerPacket.dPadLeft());
+    Serial.print(",");
+    Serial.println(controllerPacket.dPadRight());
   }
 }
