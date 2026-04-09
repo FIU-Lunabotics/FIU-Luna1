@@ -113,6 +113,9 @@ int escPin1 = 9;
 int escPin2 = 10;
 int linAcc1 = 11;
 int linAcc2 = 12;
+#define HALL_A 22
+#define HALL_B 24
+#define HALL_C 26
 // int button1 = 2; removed these lines to establish 
 // int button2 = 3;
 // int button3 = 4;
@@ -124,12 +127,24 @@ int dir2 = 7;
 int throttleMin = 0;   // ESC minimum throttle
 int throttleMax = 2000;   // ESC maximum throttle
 
+void printHallSensorStates() {
+  Serial.print("  Hall: ");
+  Serial.print(digitalRead(HALL_A));
+  Serial.print(" ");
+  Serial.print(digitalRead(HALL_B));
+  Serial.print(" ");
+  Serial.print(digitalRead(HALL_C));
+}
+
 void setup() {
   // pinMode(button1,INPUT);
   // pinMode(button2,INPUT);
   // pinMode(button3,INPUT);
   // pinMode(button4,INPUT);
   Serial.begin(9600);
+  pinMode(HALL_A, INPUT_PULLUP);
+  pinMode(HALL_B, INPUT_PULLUP);
+  pinMode(HALL_C, INPUT_PULLUP);
   pinMode(linAcc1, OUTPUT);
   pinMode(linAcc2, OUTPUT);
   pinMode(dir1, OUTPUT);
@@ -164,6 +179,8 @@ void loop() {
     Serial.print("  RJoyY: ");
     Serial.print(controllerPacket.joy_right_y);
     Serial.print("  RT: ");
-    Serial.println(controllerPacket.trigger);
+    Serial.print(controllerPacket.trigger);
+    printHallSensorStates();
+    Serial.println();
   }
 }
