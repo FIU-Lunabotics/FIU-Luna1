@@ -40,7 +40,7 @@ const (
 	roverStateFilePath        = "/tmp/rover_state"
 	roverStateRequestFilePath = "/tmp/rover_state_request"
 	// Treat stale state as unsafe so controller packets cannot move the rover.
-	roverStateMaxAge = 2 * time.Second
+	roverStateMaxAge        = 2 * time.Second
 	stateChangeHoldDuration = 500 * time.Millisecond
 )
 
@@ -902,29 +902,30 @@ func handleClient(conn net.Conn, formatter *ByteFormatter, serialMgr *SerialMana
 		data := formatter.Format(&state)
 
 		// Method 2: keep the serial port available, but gate each write on rover state.
+		serialAllowed := false
+		serialStatus := "blocked: rover state unavailable"
 		stateName, stateTimestamp, ok := readRoverState()
 
-		if !ok {
-			log.Println("Rover state unavailable, skipping serial write")
-			continue
-		}
-
-		if !newRoverState(stateTimestamp) {
-			log.Printf("stale rover state for %s, skipping serial write", stateName)
-			continue
-		}
-
-		if !validRoverState(stateName) {
-
-			log.Printf("Rover state %s blocks serial write", stateName)
-			continue
-
+		if ok {
+			switch {
+			case !newRoverState(stateTimestamp):
+				serialStatus = fmt.Sprintf("blocked: stale rover state %s", stateName)
+			case !validRoverState(stateName):
+				serialStatus = fmt.Sprintf("blocked: rover state %s", stateName)
+			default:
+				serialAllowed = true
+				serialStatus = fmt.Sprintf("writing: rover state %s", stateName)
+			}
 		}
 
 		if time.Since(lastPrint) > time.Second {
 			fmt.Printf("[%s] State: %v\n", state.Source, &state)
-			fmt.Printf("[%s] Arduino bytes: [%s]\n", state.Source, formatBytes(data))
+			fmt.Printf("[%s] Arduino bytes: [%s] serial=%s\n", state.Source, formatBytes(data), serialStatus)
 			lastPrint = time.Now()
+		}
+
+		if !serialAllowed {
+			continue
 		}
 
 		serialMgr.Write(state.Source, data)

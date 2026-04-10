@@ -146,13 +146,16 @@ int dir1 = 6;
 int dir2 = 7;
 // int potPin = A0;
 
-constexpr bool BIDIRECTIONAL_ESC = true;
+constexpr bool BIDIRECTIONAL_ESC = false;
 constexpr byte joystickCenter = 128;
 constexpr byte joystickDeadband = 8;
+constexpr bool DEBUG_SERIAL = false;
+constexpr unsigned long DEBUG_INTERVAL_MS = 1000;
 
 int escPulseMin = 1000;
 int escPulseNeutral = 1500;
 int escPulseMax = 2000;
+unsigned long lastDebugPrintMs = 0;
 
 int escStopPulse() {
   return BIDIRECTIONAL_ESC ? escPulseNeutral : escPulseMin;
@@ -190,11 +193,15 @@ void setup() {
   esc2.attach(escPin2, escPulseMin, escPulseMax);
 
   // ---- ARM ESC ----
-  Serial.println("Arming ESC...");
+  if (DEBUG_SERIAL) {
+    Serial.println("Arming ESC...");
+  }
   esc1.writeMicroseconds(escStopPulse());
   esc2.writeMicroseconds(escStopPulse());
   delay(2000);
-  Serial.println("ESC Ready");
+  if (DEBUG_SERIAL) {
+    Serial.println("ESC Ready");
+  }
 }
 
 void loop() {
@@ -211,21 +218,24 @@ void loop() {
     digitalWrite(dir1, controllerPacket.dPadRight() ? HIGH : LOW);
     digitalWrite(dir2, controllerPacket.dPadLeft() ? HIGH : LOW);
 
-    Serial.print("LeftPulse: ");
-    Serial.print(leftPulse);
-    Serial.print("  RightPulse: ");
-    Serial.print(rightPulse);
-    Serial.print("  LT: ");
-    Serial.print(controllerPacket.trigger_left);
-    Serial.print("  RT: ");
-    Serial.print(controllerPacket.trigger_right);
-    Serial.print("  DPad(U,D,L,R): ");
-    Serial.print(controllerPacket.dPadUp());
-    Serial.print(",");
-    Serial.print(controllerPacket.dPadDown());
-    Serial.print(",");
-    Serial.print(controllerPacket.dPadLeft());
-    Serial.print(",");
-    Serial.println(controllerPacket.dPadRight());
+    if (DEBUG_SERIAL && millis() - lastDebugPrintMs >= DEBUG_INTERVAL_MS) {
+      lastDebugPrintMs = millis();
+      Serial.print("LeftPulse: ");
+      Serial.print(leftPulse);
+      Serial.print("  RightPulse: ");
+      Serial.print(rightPulse);
+      Serial.print("  LT: ");
+      Serial.print(controllerPacket.trigger_left);
+      Serial.print("  RT: ");
+      Serial.print(controllerPacket.trigger_right);
+      Serial.print("  DPad(U,D,L,R): ");
+      Serial.print(controllerPacket.dPadUp());
+      Serial.print(",");
+      Serial.print(controllerPacket.dPadDown());
+      Serial.print(",");
+      Serial.print(controllerPacket.dPadLeft());
+      Serial.print(",");
+      Serial.println(controllerPacket.dPadRight());
+    }
   }
 }
