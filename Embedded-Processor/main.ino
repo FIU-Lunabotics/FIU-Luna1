@@ -146,12 +146,33 @@ int dir1 = 6;
 int dir2 = 7;
 // int potPin = A0;
 
+constexpr bool BIDIRECTIONAL_ESC = true;
+constexpr byte joystickCenter = 128;
+constexpr byte joystickDeadband = 8;
+
 int escPulseMin = 1000;
 int escPulseNeutral = 1500;
 int escPulseMax = 2000;
 
+int escStopPulse() {
+  return BIDIRECTIONAL_ESC ? escPulseNeutral : escPulseMin;
+}
+
 int axisToPulse(byte axisValue) {
-  return map(axisValue, 0, 255, escPulseMin, escPulseMax);
+  if (BIDIRECTIONAL_ESC) {
+    if (abs(static_cast<int>(axisValue) - joystickCenter) <= joystickDeadband) {
+      return escPulseNeutral;
+    }
+    return map(axisValue, 0, 255, escPulseMin, escPulseMax);
+  }
+
+  int deflection = abs(static_cast<int>(axisValue) - joystickCenter);
+  if (deflection <= joystickDeadband) {
+    return escPulseMin;
+  }
+
+  int maxDeflection = max(joystickCenter, static_cast<byte>(255 - joystickCenter));
+  return map(deflection, joystickDeadband, maxDeflection, escPulseMin, escPulseMax);
 }
 
 void setup() {
@@ -170,9 +191,8 @@ void setup() {
 
   // ---- ARM ESC ----
   Serial.println("Arming ESC...");
-  // The server now sends centered joystick values around 1500 us.
-  esc1.writeMicroseconds(escPulseNeutral);
-  esc2.writeMicroseconds(escPulseNeutral);
+  esc1.writeMicroseconds(escStopPulse());
+  esc2.writeMicroseconds(escStopPulse());
   delay(2000);
   Serial.println("ESC Ready");
 }
