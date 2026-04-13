@@ -14,8 +14,8 @@ constexpr size_t BUFFER_SIZE = 64;
 
 constexpr byte DXP_POS_MASK = 1 << 2;
 constexpr byte DXP_NEG_MASK = 1 << 3;
-constexpr byte DYP_NEG_MASK = 1 << 4;
-constexpr byte DYP_POS_MASK = 1 << 5;
+constexpr byte DYP_NEG_MASK = 1 << 4; //Line 16 - bit 4 = D-Pad UP
+constexpr byte DYP_POS_MASK = 1 << 5; //Line 16 - bit 5 = D-Pad DOWN
 
 struct ControlPacket {
   byte start_byte = 0;
@@ -130,18 +130,26 @@ struct ControlPacket {
   bool dPadDown() const {
     return (secondary_buttons & DYP_POS_MASK) != 0;
   }
+
+  bool getYButton() const {
+    return (primary_buttons & (1 << 7)) != 0;
+  }
 };
 
 ControlPacket controllerPacket;
 
+bool vibrationOn = false;
+bool lastYButtonState = false;
+
 int escPin1 = 9;
 int escPin2 = 10;
-int linAcc1 = 11;
-int linAcc2 = 12;
+int linAcc1 = 11;  //ACTUATOR Extend
+int linAcc2 = 12;  //ACTUATOR Retract
+int vibrationPin = 3;  // PWM pin for vibration motor
 // int button1 = 2; removed these lines to establish 
-// int button2 = 3;
-// int button3 = 4;
-// int button4 = 5;
+// int button2 = 4;  (was 3, now used for vibration)
+// int button3 = 5;  (was 4)
+// int button4 = 8;  (was 5)
 int dir1 = 6;
 int dir2 = 7;
 // int potPin = A0;
@@ -188,6 +196,7 @@ void setup() {
   pinMode(linAcc2, OUTPUT);
   pinMode(dir1, OUTPUT);
   pinMode(dir2, OUTPUT);
+  pinMode(vibrationPin, OUTPUT);
 
   esc1.attach(escPin1, escPulseMin, escPulseMax);
   esc2.attach(escPin2, escPulseMin, escPulseMax);
@@ -217,6 +226,18 @@ void loop() {
     digitalWrite(linAcc2, controllerPacket.dPadDown() ? HIGH : LOW);
     digitalWrite(dir1, controllerPacket.dPadRight() ? HIGH : LOW);
     digitalWrite(dir2, controllerPacket.dPadLeft() ? HIGH : LOW);
+
+    //Adding toggle logic for vibration motor on Y button press. 
+    bool currentYButton = controllerPacket.getYButton();
+    if (currentYButton && !lastYButtonState) {
+      vibrationOn = !vibrationOn;
+      if (vibrationOn) {
+        analogWrite(vibrationPin, 255);
+      } else {
+        analogWrite(vibrationPin, 0);
+      }
+    }
+    lastYButtonState = currentYButton;
 
     if (DEBUG_SERIAL && millis() - lastDebugPrintMs >= DEBUG_INTERVAL_MS) {
       lastDebugPrintMs = millis();
