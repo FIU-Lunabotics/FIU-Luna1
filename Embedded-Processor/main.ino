@@ -146,7 +146,8 @@ int dir1 = 6;
 int dir2 = 7;
 // int potPin = A0;
 
-constexpr bool BIDIRECTIONAL_ESC = false;
+// constexpr bool BIDIRECTIONAL_ESC = false;
+constexpr bool BIDIRECTIONAL_ESC = true;
 constexpr byte joystickCenter = 128;
 constexpr byte joystickDeadband = 8;
 constexpr bool DEBUG_SERIAL = false;
@@ -155,6 +156,10 @@ constexpr unsigned long DEBUG_INTERVAL_MS = 1000;
 int escPulseMin = 1000;
 int escPulseNeutral = 1500;
 int escPulseMax = 2000;
+
+//valriables for reverse control
+
+
 unsigned long lastDebugPrintMs = 0;
 
 int escStopPulse() {
@@ -198,7 +203,7 @@ void setup() {
   }
   esc1.writeMicroseconds(escStopPulse());
   esc2.writeMicroseconds(escStopPulse());
-  delay(2000);
+  delay(2000);//was 2000
   if (DEBUG_SERIAL) {
     Serial.println("ESC Ready");
   }
