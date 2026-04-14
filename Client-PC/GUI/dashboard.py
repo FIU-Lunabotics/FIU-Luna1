@@ -664,12 +664,12 @@ app.title = "FIU Luna1 Teleop Dashboard"
 app.layout = dbc.Container(
     fluid=True,
     children=[
-        html.H2("FIU Luna1 Teleop Dashboard"),
+        html.H2("FIU Luna1 Teleop Dashboard", className="dashboard-title"),
         html.Div(
             "Monitor the repo's wire protocol live and optionally proxy packets to Server-Pi.",
-            className="mb-3 text-muted",
+            className="dashboard-description",
         ),
-        html.Div(id="status-bar", style={"fontFamily": "monospace", "marginBottom": "12px"}),
+        html.Div(id="status-bar"),
         dcc.Interval(id="tick", interval=max(16, CONFIG.ui_refresh_ms), n_intervals=0),
         dbc.Row(
             [
@@ -1055,7 +1055,7 @@ def run_browser_mode():
         f"http://{CONFIG.ui_host}:{CONFIG.ui_port} | "
         f"packet listener on {CONFIG.listen_host}:{CONFIG.listen_port}"
     )
-    app.run(host=CONFIG.ui_host, port=CONFIG.ui_port, debug=False)
+    app.run(host=CONFIG.ui_host, port=CONFIG.ui_port, debug=True, dev_tools_hot_reload=True)
 
 
 def run_desktop_mode():

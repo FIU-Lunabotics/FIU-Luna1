@@ -1,0 +1,61 @@
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+:root {
+  --nasa-blue: #0b3d91;
+  --nasa-red: #fc3d21;
+  --bg: #ffffff;
+  --panel: #f4f7fb;
+  --panel-border: #cfd9e6;
+  --text: #142033;
+  --muted: #5f6f86;
+  --success: #1f9d68;
+}
+
+
+body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "JetBrains Mono", monospace;
+}
+.dashboard-title {
+    color: var(--nasa-blue);
+
+    text-align: center;
+    font-family: "Orbitron", sans-serif;
+    font-weight: 800;
+    
+}
+.dashboard-description {
+    color: var(--muted);
+    font-size: 1rem;
+    text-align: center;
+    margin-bottom: 1rem;
+    font-family: "Orbitron", sans-serif;
+
+}
+
+#status-bar {
+  font-family: "JetBrains Mono", monospace;
+  padding: 12px 18px;
+  background: #eef4ff;  
+  word-spacing: 6px;
+  border: 1px solid #b9cbed;
+  border-radius: 12px;
+  text-align: center;
+  color: var(--nasa-blue);
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  color: var(--text);
+}
+
+#mode-label {
+  color:var(--success);
+  font-weight:700;
+}
+
+#tab-content {
+  margin-top: 12px;
+}
