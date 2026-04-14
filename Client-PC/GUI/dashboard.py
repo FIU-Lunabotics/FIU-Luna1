@@ -13,7 +13,7 @@ from collections import deque
 import dash
 import dash_bootstrap_components as dbc
 from dash import dcc, html
-from dash.dependencies import Input, Output
+from dash.dependencies import Input, Output, State
 
 
 DEFAULT_CONTROLLER_STATE = {
@@ -658,9 +658,230 @@ def age_text(seconds):
     return f"{seconds:.2f}s ago"
 
 
+def build_main_controller_view(controller, combo_text, mode, rover_state):
+    actuator_state = (
+        "Extend" if int(controller["dY"]) < 0
+        else "Retract" if int(controller["dY"]) > 0
+        else "Idle"
+    )
+    vibration_input = "Y pressed" if controller["N"] == 1 else "Idle"
+    rover_state_label = rover_state.get("state", "unknown") if rover_state and rover_state.get("valid") else "unknown"
+
+    return dbc.Row(
+        [
+            dbc.Col(
+                dbc.Card(
+                    dbc.CardBody(
+                        [
+                            html.Div("Left Control", className="controller-panel-title"),
+                            joystick_widget("Left Stick", int(controller["LjoyX"]), int(controller["LjoyY"])),
+                            trigger_bar("Left Trigger", int(controller["LT"])),
+                            html.Div(
+                                f"LB: {'Pressed' if controller['LB'] == 1 else 'Idle'}",
+                                className="controller-meta-line",
+                            ),
+                            html.Div(
+                                f"LS: {'Pressed' if controller['LS'] == 1 else 'Idle'}",
+                                className="controller-meta-line",
+                            ),
+                        ]
+                    ),
+                    className="controller-panel h-100",
+                ),
+                md=4,
+            ),
+            dbc.Col(
+                dbc.Card(
+                    dbc.CardBody(
+                        [
+                            html.Div("Right Control", className="controller-panel-title"),
+                            joystick_widget("Right Stick", int(controller["RjoyX"]), int(controller["RjoyY"])),
+                            trigger_bar("Right Trigger", int(controller["RT"])),
+                            html.Div(
+                                f"RB: {'Pressed' if controller['RB'] == 1 else 'Idle'}",
+                                className="controller-meta-line",
+                            ),
+                            html.Div(
+                                f"RS: {'Pressed' if controller['RS'] == 1 else 'Idle'}",
+                                className="controller-meta-line",
+                            ),
+                        ]
+                    ),
+                    className="controller-panel h-100",
+                ),
+                md=4,
+            ),
+            dbc.Col(
+                dbc.Card(
+                    dbc.CardBody(
+                        [
+                            html.Div("Xbox Mapping", className="controller-panel-title"),
+                            html.Div(
+                                [
+                                    html.Div(
+                                        "Y",
+                                        className=f"face-button face-button-y{' active' if controller['N'] == 1 else ''}",
+                                    ),
+                                    html.Div(
+                                        "X",
+                                        className=f"face-button face-button-x{' active' if controller['W'] == 1 else ''}",
+                                    ),
+                                    html.Div(
+                                        "B",
+                                        className=f"face-button face-button-b{' active' if controller['E'] == 1 else ''}",
+                                    ),
+                                    html.Div(
+                                        "A",
+                                        className=f"face-button face-button-a{' active' if controller['S'] == 1 else ''}",
+                                    ),
+                                ],
+                                className="face-button-grid",
+                            ),
+                            html.Div(
+                                [
+                                    html.Div(
+                                        "U",
+                                        className=f"dpad-cell dpad-up{' active' if controller['dY'] < 0 else ''}",
+                                    ),
+                                    html.Div(
+                                        "L",
+                                        className=f"dpad-cell dpad-left{' active' if controller['dX'] < 0 else ''}",
+                                    ),
+                                    html.Div(
+                                        "R",
+                                        className=f"dpad-cell dpad-right{' active' if controller['dX'] > 0 else ''}",
+                                    ),
+                                    html.Div(
+                                        "D",
+                                        className=f"dpad-cell dpad-down{' active' if controller['dY'] > 0 else ''}",
+                                    ),
+                                ],
+                                className="dpad-grid",
+                            ),
+                            html.Div(
+                                [
+                                    html.Div(f"DPad: x={controller['dX']} y={controller['dY']}", className="controller-meta-line"),
+                                    html.Div(f"Actuator: {actuator_state}", className="controller-meta-line"),
+                                    html.Div(f"Vibration Input: {vibration_input}", className="controller-meta-line"),
+                                    html.Div(f"Rover: {rover_state_label}", className="controller-meta-line"),
+                                    html.Div(f"Mode: {mode}", className="controller-meta-line"),
+                                    html.Div(f"State Combo: {combo_text}", className="controller-meta-line"),
+                                ],
+                                className="subsystem-stack",
+                            ),
+                        ]
+                    ),
+                    className="controller-panel h-100",
+                ),
+                md=4,
+            ),
+        ],
+        className="g-3",
+    )
+
+
+def build_debug_controller_view(controller, combo_state, requested_mode, combo_text, rover_state, rover_request):
+    return dbc.Row(
+        [
+            dbc.Col(
+                [
+                    joystick_widget("Left Stick", int(controller["LjoyX"]), int(controller["LjoyY"])),
+                    trigger_bar("Left Trigger", int(controller["LT"])),
+                ],
+                md=4,
+            ),
+            dbc.Col(
+                [
+                    joystick_widget("Right Stick", int(controller["RjoyX"]), int(controller["RjoyY"])),
+                    trigger_bar("Right Trigger", int(controller["RT"])),
+                ],
+                md=4,
+            ),
+            dbc.Col(
+                dbc.Card(
+                    dbc.CardBody(
+                        [
+                            html.Div("Buttons", style={"fontWeight": "bold", "marginBottom": "10px"}),
+                            button_light("N", controller["N"] == 1),
+                            button_light("E", controller["E"] == 1),
+                            button_light("S", controller["S"] == 1),
+                            button_light("W", controller["W"] == 1),
+                            html.Hr(),
+                            button_light("LB", controller["LB"] == 1),
+                            button_light("RB", controller["RB"] == 1),
+                            button_light("LS", controller["LS"] == 1),
+                            button_light("RS", controller["RS"] == 1),
+                            html.Hr(),
+                            button_light("SELECT", controller["SELECT"] == 1),
+                            button_light("START", controller["START"] == 1),
+                            html.Hr(),
+                            html.Div(
+                                f"DPad: x={controller['dX']} y={controller['dY']}",
+                                style={"fontFamily": "monospace"},
+                            ),
+                            html.Div(
+                                f"Source: {controller.get('source', 'pc')}",
+                                style={"fontFamily": "monospace", "marginTop": "8px"},
+                            ),
+                            html.Div(
+                                f"Timestamp: {controller.get('ts', 0)}",
+                                style={"fontFamily": "monospace"},
+                            ),
+                            html.Hr(),
+                            html.Div("State Switch", style={"fontWeight": "bold", "marginBottom": "10px"}),
+                            html.Div(
+                                f"Combo status: {combo_state}",
+                                style={"fontFamily": "monospace"},
+                            ),
+                            html.Div(
+                                f"Requested mode: {requested_mode or 'none'}",
+                                style={"fontFamily": "monospace"},
+                            ),
+                            html.Div(
+                                combo_text,
+                                style={"fontFamily": "monospace"},
+                            ),
+                            html.Div(
+                                f"Pending request: "
+                                f"{rover_request.get('state', 'none') if is_fresh_state_info(rover_request) else 'none'}",
+                                style={"fontFamily": "monospace", "marginTop": "8px"},
+                            ),
+                            html.Div(
+                                (
+                                    f"Pending seq/source: "
+                                    f"{rover_request.get('seq', '-')}/{rover_request.get('source', '-')}"
+                                    if is_fresh_state_info(rover_request)
+                                    else "Pending seq/source: -"
+                                ),
+                                style={"fontFamily": "monospace"},
+                            ),
+                            html.Div(
+                                (
+                                    f"Rover state: {rover_state.get('state', 'unknown')}"
+                                    if rover_state and rover_state.get("valid")
+                                    else "Rover state: unknown"
+                                ),
+                                style={"fontFamily": "monospace", "marginTop": "8px"},
+                            ),
+                            html.Div(
+                                (
+                                    f"Rover state age: {state_age_text(rover_state.get('timestamp'))}"
+                                    if rover_state and rover_state.get("valid")
+                                    else "Rover state age: unknown"
+                                ),
+                                style={"fontFamily": "monospace"},
+                            ),
+                        ]
+                    )
+                ),
+                md=4,
+            ),
+        ]
+    )
+
+
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.CYBORG])
 app.title = "FIU Luna1 Teleop Dashboard"
-
 app.layout = dbc.Container(
     fluid=True,
     children=[
@@ -669,6 +890,7 @@ app.layout = dbc.Container(
             "Monitor the repo's wire protocol live and optionally proxy packets to Server-Pi.",
             className="dashboard-description",
         ),
+        dcc.Store(id="controller-view", data="main"),
         html.Div(id="status-bar"),
         dcc.Interval(id="tick", interval=max(16, CONFIG.ui_refresh_ms), n_intervals=0),
         dbc.Row(
@@ -720,9 +942,56 @@ app.layout = dbc.Container(
             active_tab="controller",
             className="mb-3",
         ),
+        dbc.ButtonGroup(
+            [
+                dbc.Button("Xbox View", id="btn-main-view", n_clicks=0, color="primary", outline=False),
+                dbc.Button("Debug View", id="btn-debug-view", n_clicks=0, color="secondary", outline=True),
+            ],
+            id="controller-view-toggle",
+            className="controller-view-toggle mb-3",
+        ),
         html.Div(id="tab-content"),
     ],
 )
+
+
+@app.callback(
+    Output("controller-view", "data"),
+    Output("btn-main-view", "color"),
+    Output("btn-debug-view", "color"),
+    Output("btn-main-view", "outline"),
+    Output("btn-debug-view", "outline"),
+    Input("btn-main-view", "n_clicks"),
+    Input("btn-debug-view", "n_clicks"),
+    State("controller-view", "data"),
+)
+def set_controller_view(_, __, current_view):
+    if not current_view:
+        current_view = "main"
+
+    triggered = dash.ctx.triggered_id
+    if triggered == "btn-debug-view":
+        current_view = "debug"
+    elif triggered == "btn-main-view":
+        current_view = "main"
+
+    return (
+        current_view,
+        "primary" if current_view == "main" else "secondary",
+        "primary" if current_view == "debug" else "secondary",
+        current_view != "main",
+        current_view != "debug",
+    )
+
+
+@app.callback(
+    Output("controller-view-toggle", "style"),
+    Input("tabs", "active_tab"),
+)
+def toggle_controller_view_buttons(active_tab):
+    if active_tab == "controller":
+        return {}
+    return {"display": "none"}
 
 
 @app.callback(
@@ -734,8 +1003,9 @@ app.layout = dbc.Container(
     Output("tab-content", "children"),
     Input("tick", "n_intervals"),
     Input("tabs", "active_tab"),
+    Input("controller-view", "data"),
 )
-def update_ui(_, active_tab):
+def update_ui(_, active_tab, controller_view):
     with state_lock:
         controller = dict(latest_controller_state)
         meta = dict(latest_controller_meta)
@@ -806,103 +1076,17 @@ def update_ui(_, active_tab):
     ]
 
     if active_tab == "controller":
-        content = dbc.Row(
-            [
-                dbc.Col(
-                    [
-                        joystick_widget("Left Stick", int(controller["LjoyX"]), int(controller["LjoyY"])),
-                        trigger_bar("Left Trigger", int(controller["LT"])),
-                    ],
-                    md=4,
-                ),
-                dbc.Col(
-                    [
-                        joystick_widget("Right Stick", int(controller["RjoyX"]), int(controller["RjoyY"])),
-                        trigger_bar("Right Trigger", int(controller["RT"])),
-                    ],
-                    md=4,
-                ),
-                dbc.Col(
-                    dbc.Card(
-                        dbc.CardBody(
-                            [
-                                html.Div("Buttons", style={"fontWeight": "bold", "marginBottom": "10px"}),
-                                button_light("N", controller["N"] == 1),
-                                button_light("E", controller["E"] == 1),
-                                button_light("S", controller["S"] == 1),
-                                button_light("W", controller["W"] == 1),
-                                html.Hr(),
-                                button_light("LB", controller["LB"] == 1),
-                                button_light("RB", controller["RB"] == 1),
-                                button_light("LS", controller["LS"] == 1),
-                                button_light("RS", controller["RS"] == 1),
-                                html.Hr(),
-                                button_light("SELECT", controller["SELECT"] == 1),
-                                button_light("START", controller["START"] == 1),
-                                html.Hr(),
-                                html.Div(
-                                    f"DPad: x={controller['dX']} y={controller['dY']}",
-                                    style={"fontFamily": "monospace"},
-                                ),
-                                html.Div(
-                                    f"Source: {controller.get('source', 'pc')}",
-                                    style={"fontFamily": "monospace", "marginTop": "8px"},
-                                ),
-                                html.Div(
-                                    f"Timestamp: {controller.get('ts', 0)}",
-                                    style={"fontFamily": "monospace"},
-                                ),
-                                html.Hr(),
-                                html.Div("State Switch", style={"fontWeight": "bold", "marginBottom": "10px"}),
-                                html.Div(
-                                    f"Combo status: {combo_state}",
-                                    style={"fontFamily": "monospace"},
-                                ),
-                                html.Div(
-                                    f"Requested mode: {requested_mode or 'none'}",
-                                    style={"fontFamily": "monospace"},
-                                ),
-                                html.Div(
-                                    combo_text,
-                                    style={"fontFamily": "monospace"},
-                                ),
-                                html.Div(
-                                    f"Pending request: "
-                                    f"{rover_request.get('state', 'none') if is_fresh_state_info(rover_request) else 'none'}",
-                                    style={"fontFamily": "monospace", "marginTop": "8px"},
-                                ),
-                                html.Div(
-                                    (
-                                        f"Pending seq/source: "
-                                        f"{rover_request.get('seq', '-')}/{rover_request.get('source', '-')}"
-                                        if is_fresh_state_info(rover_request)
-                                        else "Pending seq/source: -"
-                                    ),
-                                    style={"fontFamily": "monospace"},
-                                ),
-                                html.Div(
-                                    (
-                                        f"Rover state: {rover_state.get('state', 'unknown')}"
-                                        if rover_state and rover_state.get("valid")
-                                        else "Rover state: unknown"
-                                    ),
-                                    style={"fontFamily": "monospace", "marginTop": "8px"},
-                                ),
-                                html.Div(
-                                    (
-                                        f"Rover state age: {state_age_text(rover_state.get('timestamp'))}"
-                                        if rover_state and rover_state.get("valid")
-                                        else "Rover state age: unknown"
-                                    ),
-                                    style={"fontFamily": "monospace"},
-                                ),
-                            ]
-                        )
-                    ),
-                    md=4,
-                ),
-            ]
-        )
+        if controller_view == "debug":
+            content = build_debug_controller_view(
+                controller,
+                combo_state,
+                requested_mode,
+                combo_text,
+                rover_state,
+                rover_request,
+            )
+        else:
+            content = build_main_controller_view(controller, combo_text, mode, rover_state)
     elif active_tab == "status":
         if statuses:
             rows = []
@@ -1046,10 +1230,17 @@ def update_ui(_, active_tab):
     return status_bar, mode, controller_summary, network_summary, traffic_summary, content
 
 
-threading.Thread(target=proxy_server_thread, daemon=True).start()
+def start_proxy_server_thread():
+    thread = threading.Thread(target=proxy_server_thread, daemon=True)
+    thread.start()
+    return thread
 
 
 def run_browser_mode():
+    # Dash's hot reloader starts a parent supervisor process and a child process.
+    # Only the child should own the packet listener socket.
+    if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+        start_proxy_server_thread()
     print(
         "Starting dashboard UI on "
         f"http://{CONFIG.ui_host}:{CONFIG.ui_port} | "
@@ -1059,6 +1250,7 @@ def run_browser_mode():
 
 
 def run_desktop_mode():
+    start_proxy_server_thread()
     if os.environ.get("SNAP_NAME") == "code":
         # VS Code's snap injects GTK/GIO paths that break pywebview's desktop backend.
         for key in list(os.environ):
