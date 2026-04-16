@@ -81,6 +81,47 @@ python dashboard.py --listen-port 8090
 This is useful if you want to test packet parsing without forwarding to a live
 server.
 
+## Hall telemetry graph
+
+The repo also includes a small Hall-effect telemetry UI for issue `#19`. It is
+built with the same Dash stack as `dashboard.py`, but it focuses on serial/log
+feedback lines that contain Hall states such as `101`.
+
+Install the extra GUI dependencies if needed:
+
+```bash
+cd Client-PC/GUI
+pip install -r requirements.txt
+```
+
+Run against a serial port:
+
+```bash
+cd Client-PC/GUI
+python hall_dashboard.py --serial-port /dev/tty.usbmodemXXXX --baudrate 9600 --motor-poles 8
+```
+
+Run by tailing a saved feedback log:
+
+```bash
+cd Client-PC/GUI
+python hall_dashboard.py --input-file hall_feedback.log --motor-poles 8
+```
+
+Then open:
+
+```bash
+http://127.0.0.1:8060
+```
+
+The Hall dashboard:
+
+- parses raw Hall states like `101`
+- tracks valid Hall transitions over a rolling time window
+- estimates electrical RPM and mechanical RPM
+- uses the configured motor pole count to convert to shaft RPM
+- graphs speed over time and keeps the latest raw feedback line visible
+
 ## Useful flags
 
 | Flag | Default | Purpose |
