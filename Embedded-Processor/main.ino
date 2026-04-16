@@ -113,6 +113,9 @@ int escPin1 = 9;
 int escPin2 = 10;
 int linAcc1 = 11;
 int linAcc2 = 12;
+constexpr uint8_t HALL_A = 22;
+constexpr uint8_t HALL_B = 24;
+constexpr uint8_t HALL_C = 26;
 // int button1 = 2; removed these lines to establish 
 // int button2 = 3;
 // int button3 = 4;
@@ -124,12 +127,67 @@ int dir2 = 7;
 int throttleMin = 0;   // ESC minimum throttle
 int throttleMax = 2000;   // ESC maximum throttle
 
+constexpr uint8_t POLE_PAIRS = 4;
+constexpr uint8_t HALL_TRANSITIONS_PER_REV = POLE_PAIRS * 6;
+constexpr uint32_t RPM_UPDATE_INTERVAL_MS = 500;
+
+uint32_t lastRpmCalcMs = 0;
+uint32_t hallPulseCount = 0;
+float currentRpm = 0.0f;
+int lastHallState = -1;
+
+bool isValidHallState(int state) {
+  return state >= 1 && state <= 6;
+}
+
+int readHallState() {
+  return (digitalRead(HALL_A) << 2) |
+         (digitalRead(HALL_B) << 1) |
+         digitalRead(HALL_C);
+}
+
+void updateRpm() {
+  const int state = readHallState();
+  if (isValidHallState(state)) {
+    if (lastHallState == -1) {
+      lastHallState = state;
+    } else if (state != lastHallState) {
+      hallPulseCount++;
+      lastHallState = state;
+    }
+  }
+
+  const uint32_t now = millis();
+  if (now - lastRpmCalcMs >= RPM_UPDATE_INTERVAL_MS) {
+    const float elapsedSeconds = (now - lastRpmCalcMs) / 1000.0f;
+    currentRpm = (hallPulseCount / static_cast<float>(HALL_TRANSITIONS_PER_REV)) *
+                 (60.0f / elapsedSeconds);
+    hallPulseCount = 0;
+    lastRpmCalcMs = now;
+  }
+}
+
+void printHallSensorStates() {
+  const int hallState = readHallState();
+  Serial.print("  Hall: ");
+  Serial.print((hallState >> 2) & 0x01);
+  Serial.print(" ");
+  Serial.print((hallState >> 1) & 0x01);
+  Serial.print(" ");
+  Serial.print(hallState & 0x01);
+  Serial.print("  RPM: ");
+  Serial.print(currentRpm, 1);
+}
+
 void setup() {
   // pinMode(button1,INPUT);
   // pinMode(button2,INPUT);
   // pinMode(button3,INPUT);
   // pinMode(button4,INPUT);
   Serial.begin(9600);
+  pinMode(HALL_A, INPUT_PULLUP);
+  pinMode(HALL_B, INPUT_PULLUP);
+  pinMode(HALL_C, INPUT_PULLUP);
   pinMode(linAcc1, OUTPUT);
   pinMode(linAcc2, OUTPUT);
   pinMode(dir1, OUTPUT);
@@ -143,10 +201,13 @@ void setup() {
   esc1.writeMicroseconds(throttleMin);
   esc2.writeMicroseconds(throttleMin);
   delay(2000);  // most ESCs need 2 seconds of minimum throttle
+  lastRpmCalcMs = millis();
   Serial.println("ESC Ready");
 }
 
 void loop() {
+  updateRpm();
+
   if (Serial.available() >= PACKET_TOTAL_SIZE && controllerPacket.update() > 0) {
     int throttle = map(controllerPacket.joy_left_y, 0, 255, 1000, 2000);
     esc1.writeMicroseconds(throttle);
@@ -164,6 +225,8 @@ void loop() {
     Serial.print("  RJoyY: ");
     Serial.print(controllerPacket.joy_right_y);
     Serial.print("  RT: ");
-    Serial.println(controllerPacket.trigger);
+    Serial.print(controllerPacket.trigger);
+    printHallSensorStates();
+    Serial.println();
   }
 }
