@@ -214,7 +214,7 @@ def build_rpm_figure(points):
         template="plotly_dark",
         paper_bgcolor="#111723",
         plot_bgcolor="#111723",
-        margin={"l": 40, "r": 20, "t": 30, "b": 40},
+        margin={"l": 40, "r": 20, "t": 18, "b": 32},
         xaxis_title="Seconds in rolling buffer",
         yaxis_title="RPM",
     )
@@ -278,7 +278,10 @@ app.layout = dbc.Container(
                     dbc.Card(
                         dbc.CardBody(
                             [
-                                html.Div("Estimated Mechanical RPM", style={"fontWeight": "bold"}),
+                                html.Div(
+                                    "Estimated Mechanical RPM",
+                                    style={"fontWeight": "bold", "marginBottom": "4px"},
+                                ),
                                 dcc.Graph(id="rpm-graph", config={"displayModeBar": False}),
                             ]
                         )
@@ -286,12 +289,14 @@ app.layout = dbc.Container(
                     md=8,
                 ),
                 dbc.Col(
-                    dbc.Card(
+                dbc.Card(
                         dbc.CardBody(
                             [
                                 html.Div("Latest Feedback", style={"fontWeight": "bold", "marginBottom": "10px"}),
-                                html.H3(id="current-hall", style={"fontFamily": "monospace"}),
-                                html.Div(id="current-rpm", style={"fontFamily": "monospace", "marginBottom": "6px"}),
+                                html.H2(
+                                    id="current-rpm",
+                                    style={"fontFamily": "monospace", "marginBottom": "8px"},
+                                ),
                                 html.Div(
                                     id="current-electrical-rpm",
                                     style={"fontFamily": "monospace", "marginBottom": "6px"},
@@ -300,6 +305,7 @@ app.layout = dbc.Container(
                                     id="current-transition-rate",
                                     style={"fontFamily": "monospace", "marginBottom": "6px"},
                                 ),
+                                html.Div(id="current-hall", style={"fontFamily": "monospace", "marginBottom": "6px"}),
                                 html.Div(
                                     id="last-update-age",
                                     style={"fontFamily": "monospace", "marginBottom": "10px"},
@@ -369,10 +375,10 @@ app.layout = dbc.Container(
     Output("sample-summary", "children"),
     Output("rpm-graph", "figure"),
     Output("hall-graph", "figure"),
-    Output("current-hall", "children"),
     Output("current-rpm", "children"),
     Output("current-electrical-rpm", "children"),
     Output("current-transition-rate", "children"),
+    Output("current-hall", "children"),
     Output("last-update-age", "children"),
     Output("last-line", "children"),
     Output("reader-logs", "children"),
@@ -421,10 +427,10 @@ def update_ui(_):
         sample_summary,
         build_rpm_figure(points),
         build_hall_figure(points),
-        snapshot["hall"],
-        f"mechanical rpm: {snapshot['rpm']:.2f}",
+        f"{snapshot['rpm']:.2f} RPM",
         f"electrical rpm: {snapshot['electrical_rpm']:.2f}",
         f"hall transitions/sec: {snapshot['transitions_per_second']:.2f}",
+        f"hall state: {snapshot['hall']}",
         "last update: waiting"
         if not snapshot["last_update"]
         else f"last update: {age:.2f}s ago",
