@@ -178,8 +178,9 @@ constexpr int ACTUATOR_REVERSE = -1;
 //   PWM HIGH + DIR HIGH = opposite motor direction
 constexpr int LIFT_UP_DIRECTION = ACTUATOR_FORWARD;
 constexpr int LIFT_DOWN_DIRECTION = ACTUATOR_REVERSE;
-constexpr int TILT_UP_DIRECTION = ACTUATOR_FORWARD;
-constexpr int TILT_DOWN_DIRECTION = ACTUATOR_REVERSE;
+// Tilt direction was inverted in software so D-pad Up/Down matches physical tilt motion.
+constexpr int TILT_UP_DIRECTION = ACTUATOR_REVERSE;
+constexpr int TILT_DOWN_DIRECTION = ACTUATOR_FORWARD;
 
 // D-pad actuator commands (THIS IS FOR PROG TEAM):
 //   N/Up    -> lift box up
@@ -264,15 +265,17 @@ void loop() {
     esc1.writeMicroseconds(leftPulse);
     esc2.writeMicroseconds(rightPulse);
 
+    // Controls were swapped so Left/Right now drive the lift actuator.
     int liftDirection = directionFromButtons(
-      controllerPacket.dPadUp(),
-      controllerPacket.dPadDown(),
+      controllerPacket.dPadRight(),
+      controllerPacket.dPadLeft(),
       LIFT_UP_DIRECTION,
       LIFT_DOWN_DIRECTION
     );
+    // Controls were swapped so Up/Down now drive the tilt actuator.
     int tiltDirection = directionFromButtons(
-      controllerPacket.dPadRight(),
-      controllerPacket.dPadLeft(),
+      controllerPacket.dPadUp(),
+      controllerPacket.dPadDown(),
       TILT_UP_DIRECTION,
       TILT_DOWN_DIRECTION
     );
