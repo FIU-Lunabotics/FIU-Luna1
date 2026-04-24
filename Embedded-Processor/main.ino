@@ -289,7 +289,7 @@ void loop() {
       vibrationOn = !vibrationOn;
       if (vibrationOn) {
         // Changed the value into a moderate intensity for the vibration motor. Adjust as needed.
-        analogWrite(vibrationPin, 64);
+        analogWrite(vibrationPin, 62);
       } else {
         analogWrite(vibrationPin, 0);
       }
