@@ -113,9 +113,12 @@ int escPin1 = 9;
 int escPin2 = 10;
 int linAcc1 = 11;
 int linAcc2 = 12;
-constexpr uint8_t HALL_A = 22;
-constexpr uint8_t HALL_B = 24;
-constexpr uint8_t HALL_C = 26;
+constexpr uint8_t HALL1_A = 22;
+constexpr uint8_t HALL1_B = 24;
+constexpr uint8_t HALL1_C = 26;
+constexpr uint8_t HALL2_A = 28;
+constexpr uint8_t HALL2_B = 30;
+constexpr uint8_t HALL2_C = 32;
 // int button1 = 2; removed these lines to establish 
 // int button2 = 3;
 // int button3 = 4;
@@ -131,52 +134,95 @@ constexpr uint8_t POLE_PAIRS = 4;
 constexpr uint8_t HALL_TRANSITIONS_PER_REV = POLE_PAIRS * 6;
 constexpr uint32_t RPM_UPDATE_INTERVAL_MS = 500;
 
-uint32_t lastRpmCalcMs = 0;
-uint32_t hallPulseCount = 0;
-float currentRpm = 0.0f;
-int lastHallState = -1;
+uint32_t lastRpmCalcMs1 = 0;
+uint32_t hallPulseCount1 = 0;
+float currentRpm1 = 0.0f;
+int lastHallState1 = -1;
+
+uint32_t lastRpmCalcMs2 = 0;
+uint32_t hallPulseCount2 = 0;
+float currentRpm2 = 0.0f;
+int lastHallState2 = -1;
 
 bool isValidHallState(int state) {
   return state >= 1 && state <= 6;
 }
 
-int readHallState() {
-  return (digitalRead(HALL_A) << 2) |
-         (digitalRead(HALL_B) << 1) |
-         digitalRead(HALL_C);
+int readHallState1() {
+  return (digitalRead(HALL1_A) << 2) |
+         (digitalRead(HALL1_B) << 1) |
+         digitalRead(HALL1_C);
 }
 
-void updateRpm() {
-  const int state = readHallState();
+int readHallState2() {
+  return (digitalRead(HALL2_A) << 2) |
+         (digitalRead(HALL2_B) << 1) |
+         digitalRead(HALL2_C);
+}
+
+void updateRpm1() {
+  const int state = readHallState1();
   if (isValidHallState(state)) {
-    if (lastHallState == -1) {
-      lastHallState = state;
-    } else if (state != lastHallState) {
-      hallPulseCount++;
-      lastHallState = state;
+    if (lastHallState1 == -1) {
+      lastHallState1 = state;
+    } else if (state != lastHallState1) {
+      hallPulseCount1++;
+      lastHallState1 = state;
     }
   }
 
   const uint32_t now = millis();
-  if (now - lastRpmCalcMs >= RPM_UPDATE_INTERVAL_MS) {
-    const float elapsedSeconds = (now - lastRpmCalcMs) / 1000.0f;
-    currentRpm = (hallPulseCount / static_cast<float>(HALL_TRANSITIONS_PER_REV)) *
-                 (60.0f / elapsedSeconds);
-    hallPulseCount = 0;
-    lastRpmCalcMs = now;
+  if (now - lastRpmCalcMs1 >= RPM_UPDATE_INTERVAL_MS) {
+    const float elapsedSeconds = (now - lastRpmCalcMs1) / 1000.0f;
+    currentRpm1 = (hallPulseCount1 / static_cast<float>(HALL_TRANSITIONS_PER_REV)) *
+                  (60.0f / elapsedSeconds);
+    hallPulseCount1 = 0;
+    lastRpmCalcMs1 = now;
+  }
+}
+
+void updateRpm2() {
+  const int state = readHallState2();
+  if (isValidHallState(state)) {
+    if (lastHallState2 == -1) {
+      lastHallState2 = state;
+    } else if (state != lastHallState2) {
+      hallPulseCount2++;
+      lastHallState2 = state;
+    }
+  }
+
+  const uint32_t now = millis();
+  if (now - lastRpmCalcMs2 >= RPM_UPDATE_INTERVAL_MS) {
+    const float elapsedSeconds = (now - lastRpmCalcMs2) / 1000.0f;
+    currentRpm2 = (hallPulseCount2 / static_cast<float>(HALL_TRANSITIONS_PER_REV)) *
+                  (60.0f / elapsedSeconds);
+    hallPulseCount2 = 0;
+    lastRpmCalcMs2 = now;
   }
 }
 
 void printHallSensorStates() {
-  const int hallState = readHallState();
-  Serial.print("  Hall: ");
-  Serial.print((hallState >> 2) & 0x01);
+  const int hallState1 = readHallState1();
+  const int hallState2 = readHallState2();
+
+  Serial.print("  Hall1: ");
+  Serial.print((hallState1 >> 2) & 0x01);
   Serial.print(" ");
-  Serial.print((hallState >> 1) & 0x01);
+  Serial.print((hallState1 >> 1) & 0x01);
   Serial.print(" ");
-  Serial.print(hallState & 0x01);
-  Serial.print("  RPM: ");
-  Serial.print(currentRpm, 1);
+  Serial.print(hallState1 & 0x01);
+  Serial.print("  RPM1: ");
+  Serial.print(currentRpm1, 1);
+
+  Serial.print("  Hall2: ");
+  Serial.print((hallState2 >> 2) & 0x01);
+  Serial.print(" ");
+  Serial.print((hallState2 >> 1) & 0x01);
+  Serial.print(" ");
+  Serial.print(hallState2 & 0x01);
+  Serial.print("  RPM2: ");
+  Serial.print(currentRpm2, 1);
 }
 
 void setup() {
@@ -185,9 +231,12 @@ void setup() {
   // pinMode(button3,INPUT);
   // pinMode(button4,INPUT);
   Serial.begin(9600);
-  pinMode(HALL_A, INPUT_PULLUP);
-  pinMode(HALL_B, INPUT_PULLUP);
-  pinMode(HALL_C, INPUT_PULLUP);
+  pinMode(HALL1_A, INPUT_PULLUP);
+  pinMode(HALL1_B, INPUT_PULLUP);
+  pinMode(HALL1_C, INPUT_PULLUP);
+  pinMode(HALL2_A, INPUT_PULLUP);
+  pinMode(HALL2_B, INPUT_PULLUP);
+  pinMode(HALL2_C, INPUT_PULLUP);
   pinMode(linAcc1, OUTPUT);
   pinMode(linAcc2, OUTPUT);
   pinMode(dir1, OUTPUT);
@@ -201,12 +250,14 @@ void setup() {
   esc1.writeMicroseconds(throttleMin);
   esc2.writeMicroseconds(throttleMin);
   delay(2000);  // most ESCs need 2 seconds of minimum throttle
-  lastRpmCalcMs = millis();
+  lastRpmCalcMs1 = millis();
+  lastRpmCalcMs2 = millis();
   Serial.println("ESC Ready");
 }
 
 void loop() {
-  updateRpm();
+  updateRpm1();
+  updateRpm2();
 
   if (Serial.available() >= PACKET_TOTAL_SIZE && controllerPacket.update() > 0) {
     int throttle = map(controllerPacket.joy_left_y, 0, 255, 1000, 2000);
