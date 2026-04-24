@@ -288,7 +288,8 @@ void loop() {
     if (currentYButton && !lastYButtonState) {
       vibrationOn = !vibrationOn;
       if (vibrationOn) {
-        analogWrite(vibrationPin, 255);
+        // Changed the value into a moderate intensity for the vibration motor. Adjust as needed.
+        analogWrite(vibrationPin, 64);
       } else {
         analogWrite(vibrationPin, 0);
       }
