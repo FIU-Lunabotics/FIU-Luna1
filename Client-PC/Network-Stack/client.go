@@ -279,8 +279,27 @@ func readDeviceName(path string) string {
 	return strings.TrimSpace(string(data))
 }
 
-// findEvdevController opens the first available /dev/input/event* device.
-func findEvdevController(yNorth bool, debug bool) (*evdevDevice, error) {
+func logSelectedDevice(path string) {
+	name := readDeviceName(path)
+	if name != "" {
+		log.Printf("Using evdev device: %s (%s)", path, name)
+	} else {
+		log.Printf("Using evdev device: %s", path)
+	}
+}
+
+// findEvdevController opens the requested controller device, or falls back to
+// the first available /dev/input/event* device when no path is provided.
+func findEvdevController(devicePath string, yNorth bool, debug bool) (*evdevDevice, error) {
+	if devicePath != "" {
+		d, err := openEvdev(devicePath, yNorth, debug)
+		if err != nil {
+			return nil, fmt.Errorf("open controller device %s: %w", devicePath, err)
+		}
+		logSelectedDevice(devicePath)
+		return d, nil
+	}
+
 	paths, err := filepath.Glob("/dev/input/event*")
 	if err != nil || len(paths) == 0 {
 		return nil, fmt.Errorf("no /dev/input/event* devices found")
@@ -288,12 +307,7 @@ func findEvdevController(yNorth bool, debug bool) (*evdevDevice, error) {
 	for _, p := range paths {
 		d, err := openEvdev(p, yNorth, debug)
 		if err == nil {
-			name := readDeviceName(p)
-			if name != "" {
-				log.Printf("Using evdev device: %s (%s)", p, name)
-			} else {
-				log.Printf("Using evdev device: %s", p)
-			}
+			logSelectedDevice(p)
 			return d, nil
 		}
 	}
@@ -468,7 +482,7 @@ func clampHat(val int32) int8 {
 }
 
 // runClient connects to the server and streams controller state.
-func runClient(serverAddr string, yNorth bool, debug bool) error {
+func runClient(serverAddr string, devicePath string, yNorth bool, debug bool) error {
 	conn, err := net.Dial("tcp", serverAddr)
 	if err != nil {
 		return err
@@ -478,9 +492,10 @@ func runClient(serverAddr string, yNorth bool, debug bool) error {
 	log.Println("Connected to server")
 
 	for {
-		dev, err := findEvdevController(yNorth, debug)
+		dev, err := findEvdevController(devicePath, yNorth, debug)
 		if err != nil {
 			log.Println("Waiting for controller (evdev)...")
+			log.Printf("Controller error: %v", err)
 			time.Sleep(2 * time.Second)
 			continue
 		}
@@ -504,6 +519,7 @@ func runClient(serverAddr string, yNorth bool, debug bool) error {
 
 func main() {
 	serverAddr := flag.String("server", fmt.Sprintf("localhost:%d", DefaultPort), "Server address")
+	devicePath := flag.String("device", "", "evdev controller path, for example /dev/input/by-id/...-event-joystick")
 	yNorth := flag.Bool("y-north", true, "Swap X/Y mapping so Y acts as North")
 	debugEvents := flag.Bool("debug-events", false, "Log raw evdev events for debugging")
 	flag.Parse()
@@ -518,7 +534,7 @@ func main() {
 	log.Printf("Connecting to %s (Ctrl+C to stop)", *serverAddr)
 
 	for {
-		if err := runClient(*serverAddr, *yNorth, *debugEvents); err != nil {
+		if err := runClient(*serverAddr, *devicePath, *yNorth, *debugEvents); err != nil {
 			log.Printf("Connection error: %v", err)
 		}
 		time.Sleep(3 * time.Second)

@@ -5,6 +5,8 @@ import socket
 import struct
 import threading
 import time
+import urllib.error
+import urllib.request
 import zlib
 from collections import deque
 
@@ -40,6 +42,8 @@ DEFAULT_CONTROLLER_STATE = {
 
 ROVER_STATE_FILE = "/tmp/rover_state"
 ROVER_STATE_REQUEST_FILE = "/tmp/rover_state_request"
+ROVER_STATE_MAX_AGE_SECONDS = 2.0
+STATE_CHANGE_HOLD_SECONDS = 0.5
 
 
 def parse_args():
@@ -63,6 +67,11 @@ def parse_args():
         "--forward-to",
         default="",
         help="Optional upstream host:port. When set, packets are forwarded unchanged to the real server.",
+    )
+    parser.add_argument(
+        "--state-url",
+        default="",
+        help="Optional rover state endpoint URL. Defaults to http://<forward-host>:<forward-port+1>/rover/state",
     )
     parser.add_argument(
         "--max-packet-size",
@@ -103,6 +112,13 @@ metrics = {
     "crc_failures": 0,
     "json_failures": 0,
 }
+latest_state_combo = {
+    "status": "idle",
+    "requested_mode": "",
+    "text": "Hold SELECT to enter state change mode.",
+    "hold_started": 0.0,
+    "request_issued": False,
+}
 
 
 def log(message: str):
@@ -122,6 +138,20 @@ def parse_target(target: str):
 
 
 FORWARD_TARGET = parse_target(CONFIG.forward_to) if CONFIG.forward_to else None
+STATE_ENDPOINT_URL = (
+    CONFIG.state_url
+    if CONFIG.state_url
+    else (
+        f"http://{FORWARD_TARGET[0]}:{FORWARD_TARGET[1] + 1}/rover/state"
+        if FORWARD_TARGET
+        else ""
+    )
+)
+remote_state_cache = {
+    "fetched_at": 0.0,
+    "rover_state": None,
+    "rover_request": None,
+}
 
 
 def read_exact(sock: socket.socket, size: int):
@@ -151,40 +181,92 @@ def verify_packet(packet: bytes):
     return payload, actual == expected
 
 
-def infer_mode(state):
-    active = (
-        state.get("N", 0)
-        or state.get("E", 0)
-        or state.get("S", 0)
-        or state.get("W", 0)
-        or state.get("LB", 0)
-        or state.get("RB", 0)
-        or state.get("LS", 0)
-        or state.get("RS", 0)
-        or state.get("SELECT", 0)
-        or state.get("START", 0)
-        or abs(int(state.get("dX", 0)))
-        or abs(int(state.get("dY", 0)))
-        or abs(int(state.get("LjoyX", 127)) - 127) > 3
-        or abs(int(state.get("LjoyY", 127)) - 127) > 3
-        or abs(int(state.get("RjoyX", 127)) - 127) > 3
-        or abs(int(state.get("RjoyY", 127)) - 127) > 3
-        or int(state.get("LT", 0)) > 3
-        or int(state.get("RT", 0)) > 3
-    )
-    return "TELEOP" if active else "IDLE"
+def display_mode_label(rover_state, rover_request):
+    if rover_state and rover_state.get("valid"):
+        if is_fresh_state_info(rover_state):
+            return rover_state.get("state", "UNKNOWN")
+        return f"{rover_state.get('state', 'UNKNOWN')} (last known)"
+    if is_fresh_state_info(rover_request):
+        return f"{rover_request.get('state', 'UNKNOWN')} (pending)"
+    return "UNKNOWN"
 
 
-def infer_state_combo(state):
-    if int(state.get("SELECT", 0)) == 0:
-        return "idle", "", "Hold SELECT to enter state change mode."
+def controller_requested_mode(state):
     if int(state.get("N", 0)) == 1:
-        return "request", "TELEOP", "SELECT + Y/N -> TELEOP"
+        return "TELEOP", "SELECT + Y/N -> TELEOP"
     if int(state.get("E", 0)) == 1:
-        return "request", "AUTO", "SELECT + B/E -> AUTO"
+        return "AUTO", "SELECT + B/E -> AUTO"
     if int(state.get("W", 0)) == 1:
-        return "request", "IDLE", "SELECT + X/W -> IDLE"
-    return "armed", "", "SELECT held. Press Y, B, or X to request a mode."
+        return "IDLE", "SELECT + X/W -> IDLE"
+    return "", ""
+
+
+def update_state_combo_tracker(state, now):
+    if int(state.get("SELECT", 0)) == 0:
+        latest_state_combo.update(
+            {
+                "status": "idle",
+                "requested_mode": "",
+                "text": "Hold SELECT to enter state change mode.",
+                "hold_started": 0.0,
+                "request_issued": False,
+            }
+        )
+        return
+
+    hold_started = latest_state_combo.get("hold_started", 0.0)
+    if not hold_started:
+        hold_started = now
+        latest_state_combo["hold_started"] = hold_started
+        latest_state_combo["request_issued"] = False
+
+    held_for = now - hold_started
+    requested_mode, combo_text = controller_requested_mode(state)
+
+    if held_for < STATE_CHANGE_HOLD_SECONDS:
+        remaining = max(0.0, STATE_CHANGE_HOLD_SECONDS - held_for)
+        latest_state_combo.update(
+            {
+                "status": "arming",
+                "requested_mode": "",
+                "text": f"Holding SELECT... wait {remaining:.2f}s before mode buttons can send.",
+            }
+        )
+        return
+
+    if latest_state_combo.get("request_issued"):
+        mode = latest_state_combo.get("requested_mode", "")
+        latest_state_combo.update(
+            {
+                "status": "sent",
+                "requested_mode": mode,
+                "text": (
+                    f"Sent request for {mode}. Release SELECT to arm again."
+                    if mode
+                    else "Sent request. Release SELECT to arm again."
+                ),
+            }
+        )
+        return
+
+    if requested_mode:
+        latest_state_combo.update(
+            {
+                "status": "request",
+                "requested_mode": requested_mode,
+                "text": f"Server-compatible request sent: {combo_text}",
+                "request_issued": True,
+            }
+        )
+        return
+
+    latest_state_combo.update(
+        {
+            "status": "armed",
+            "requested_mode": "",
+            "text": "SELECT held long enough. Press Y, B, or X to send a mode request.",
+        }
+    )
 
 
 def read_rover_state_file(path):
@@ -215,10 +297,44 @@ def read_rover_state_file(path):
     }
 
 
+def fetch_remote_state_snapshot():
+    if not STATE_ENDPOINT_URL:
+        return None, None
+
+    now = time.time()
+    if now - remote_state_cache["fetched_at"] < 0.25:
+        return remote_state_cache["rover_state"], remote_state_cache["rover_request"]
+
+    try:
+        with urllib.request.urlopen(STATE_ENDPOINT_URL, timeout=0.35) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, ValueError, urllib.error.URLError):
+        remote_state_cache.update({"fetched_at": now, "rover_state": None, "rover_request": None})
+        return None, None
+
+    rover_state = payload.get("rover_state")
+    rover_request = payload.get("rover_request")
+    remote_state_cache.update(
+        {
+            "fetched_at": now,
+            "rover_state": rover_state if isinstance(rover_state, dict) else None,
+            "rover_request": rover_request if isinstance(rover_request, dict) else None,
+        }
+    )
+    return remote_state_cache["rover_state"], remote_state_cache["rover_request"]
+
+
 def state_age_text(timestamp_ms):
     if not timestamp_ms:
         return "unknown"
     return age_text(max(0.0, time.time() - (timestamp_ms / 1000.0)))
+
+
+def is_fresh_state_info(info):
+    if not info or not info.get("valid") or not info.get("timestamp"):
+        return False
+    age_seconds = time.time() - (int(info["timestamp"]) / 1000.0)
+    return 0.0 <= age_seconds <= ROVER_STATE_MAX_AGE_SECONDS
 
 
 def record_raw_packet(peer, total_len, packet_type, source, crc_ok, forwarded, packet):
@@ -343,6 +459,7 @@ def update_state_from_packet(peer, total_len, packet, forwarded):
                             "packet_type": packet_type,
                         }
                     )
+                    update_state_combo_tracker(latest_controller_state, now)
                     record_raw_packet(peer, total_len, packet_type, source, True, forwarded, packet)
 
     if log_message:
@@ -622,6 +739,7 @@ def update_ui(_, active_tab):
     with state_lock:
         controller = dict(latest_controller_state)
         meta = dict(latest_controller_meta)
+        combo_info = dict(latest_state_combo)
         traffic = dict(metrics)
         status_source_count = len(status_sources)
 
@@ -638,11 +756,14 @@ def update_ui(_, active_tab):
             raw_snapshot = list(raw_packets)
 
     last_rx_age = (time.time() - meta["last_rx"]) if meta["last_rx"] else None
-    mode = infer_mode(controller)
+    remote_rover_state, remote_rover_request = fetch_remote_state_snapshot()
+    rover_state = remote_rover_state or read_rover_state_file(ROVER_STATE_FILE)
+    rover_request = remote_rover_request or read_rover_state_file(ROVER_STATE_REQUEST_FILE)
+    mode = display_mode_label(rover_state, rover_request)
     forward_label = CONFIG.forward_to if CONFIG.forward_to else "disabled"
-    combo_state, requested_mode, combo_text = infer_state_combo(controller)
-    rover_state = read_rover_state_file(ROVER_STATE_FILE)
-    rover_request = read_rover_state_file(ROVER_STATE_REQUEST_FILE)
+    combo_state = combo_info.get("status", "idle")
+    requested_mode = combo_info.get("requested_mode", "")
+    combo_text = combo_info.get("text", "Hold SELECT to enter state change mode.")
 
     status_bar = (
         f"listener={CONFIG.listen_host}:{CONFIG.listen_port} | "
@@ -660,6 +781,10 @@ def update_ui(_, active_tab):
         html.Div(f"crc_ok: {meta.get('crc_ok', False)}"),
         html.Div(f"forwarded: {meta.get('forwarded', False)}"),
         html.Div(f"state combo: {combo_text}"),
+        html.Div(
+            f"latched mode: {mode}",
+            style={"fontWeight": "bold", "marginTop": "6px"},
+        ),
     ]
 
     network_summary = [
@@ -743,20 +868,24 @@ def update_ui(_, active_tab):
                                 ),
                                 html.Div(
                                     f"Pending request: "
-                                    f"{rover_request.get('state', 'none') if rover_request else 'none'}",
+                                    f"{rover_request.get('state', 'none') if is_fresh_state_info(rover_request) else 'none'}",
                                     style={"fontFamily": "monospace", "marginTop": "8px"},
                                 ),
                                 html.Div(
                                     (
                                         f"Pending seq/source: "
                                         f"{rover_request.get('seq', '-')}/{rover_request.get('source', '-')}"
-                                        if rover_request and rover_request.get("valid")
+                                        if is_fresh_state_info(rover_request)
                                         else "Pending seq/source: -"
                                     ),
                                     style={"fontFamily": "monospace"},
                                 ),
                                 html.Div(
-                                    f"Rover state: {rover_state.get('state', 'unknown') if rover_state else 'unknown'}",
+                                    (
+                                        f"Rover state: {rover_state.get('state', 'unknown')}"
+                                        if rover_state and rover_state.get("valid")
+                                        else "Rover state: unknown"
+                                    ),
                                     style={"fontFamily": "monospace", "marginTop": "8px"},
                                 ),
                                 html.Div(

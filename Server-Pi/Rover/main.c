@@ -19,12 +19,14 @@ long stateStartTime = 0;
 long lastPrintTime = 0;
 
 const long printInterval = 2500; // how often to print the remaining time in milliseconds, in this case every second
+const long stateHeartbeatInterval = 500;
 const char *stateRequestPath = "/tmp/rover_state_request";
 
 // Forward declare changeState because the input helper can trigger transitions.
 
 void changeState(enum RoverState newState);
 void pollStateRequest(void);
+void publishCurrentState(void);
 
 long millis() {
   struct timespec ts;
@@ -109,15 +111,10 @@ void pollStateRequest(void) {
   unlink(stateRequestPath);
 }
 
-void changeState(enum RoverState newState){ // newState is just another instance for the rover state in function that is used in this function to change the state
-  long now = millis(); 
+void publishCurrentState(void) {
   const char *stateName = "UNKNOWN";
   FILE *stateFile = NULL;
-  
-  currentState = newState;
-  stateStartTime = now;
-  lastPrintTime = now; // millis returns the number of milliseconds since the board began running the current program, stores it in stateStartTime so we know when state was entered/started so we can do countdowns based on that time.
-  
+
   switch (currentState){
     case IDLE:
       stateName = "IDLE";
@@ -143,6 +140,16 @@ void changeState(enum RoverState newState){ // newState is just another instance
     perror("failed to open /tmp/rover_state");
 
   }
+}
+
+void changeState(enum RoverState newState){ // newState is just another instance for the rover state in function that is used in this function to change the state
+  long now = millis(); 
+  
+  currentState = newState;
+  stateStartTime = now;
+  lastPrintTime = now; // millis returns the number of milliseconds since the board began running the current program, stores it in stateStartTime so we know when state was entered/started so we can do countdowns based on that time.
+  
+  publishCurrentState();
 
   switch (currentState){
     case IDLE:
@@ -169,9 +176,15 @@ void setup() {
 
 void loop() {
   long now = millis(); //how long the program has been running minus the time when the state started which atp is 0 with stateStartTime updated every time the state changes.
+  static long lastStateHeartbeatTime = 0;
   // Poll once per loop so state transitions can be triggered interactively.
   pollStateInput();
   pollStateRequest();
+
+  if (now - lastStateHeartbeatTime >= stateHeartbeatInterval){
+    publishCurrentState();
+    lastStateHeartbeatTime = now;
+  }
 
   switch(currentState){
     case IDLE:
