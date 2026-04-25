@@ -55,13 +55,18 @@
         source,
         video,
         pc: null,
+        stream: null,
         signalId: "",
+        answeredSignalId: "",
         inFlight: false,
         lastRestartAt: 0,
       };
       peers.set(source, entry);
     } else {
       entry.video = video;
+      if (entry.stream && entry.video.srcObject !== entry.stream) {
+        entry.video.srcObject = entry.stream;
+      }
     }
 
     if (entry.inFlight) {
@@ -92,6 +97,20 @@
         return;
       }
 
+      if (
+        offer.signal_id &&
+        entry.answeredSignalId &&
+        offer.signal_id === entry.answeredSignalId &&
+        (!entry.pc || ["failed", "disconnected", "closed"].includes(entry.pc.connectionState))
+      ) {
+        updateState(source, "Requesting a fresh WebRTC offer...");
+        if (Date.now() - entry.lastRestartAt > 3000) {
+          entry.lastRestartAt = Date.now();
+          await requestOfferRestart(source);
+        }
+        return;
+      }
+
       if (entry.pc) {
         try {
           entry.pc.close();
@@ -107,9 +126,11 @@
       pc.addEventListener("track", (event) => {
         const [stream] = event.streams;
         if (stream) {
+          entry.stream = stream;
           entry.video.srcObject = stream;
         } else {
           const fallbackStream = new MediaStream([event.track]);
+          entry.stream = fallbackStream;
           entry.video.srcObject = fallbackStream;
         }
       });
@@ -141,6 +162,7 @@
         }),
       });
 
+      entry.answeredSignalId = offer.signal_id || "";
       updateState(source, "WebRTC answer sent. Waiting for media...");
     } catch (error) {
       updateState(source, `WebRTC error: ${error.message}`);

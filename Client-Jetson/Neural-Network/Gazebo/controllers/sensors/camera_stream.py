@@ -43,10 +43,12 @@ except ImportError:
 
 try:
     from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
+    from aiortc.exceptions import InvalidStateError
 except ImportError:
     RTCPeerConnection = None
     RTCSessionDescription = None
     VideoStreamTrack = object
+    InvalidStateError = RuntimeError
 
 try:
     from av import VideoFrame
@@ -72,7 +74,6 @@ class StatusReporter:
     def __init__(self, target, source):
         self.target = parse_target(target)
         self.source = source
-        self.sock = None
         self.connected_target = None
 
     def send(self, message, **extra_fields):
@@ -90,36 +91,33 @@ class StatusReporter:
         if self.target is None:
             return
 
+        sock = None
         try:
-            self._ensure_connected()
+            sock = socket.create_connection(self.target, timeout=3.0)
+            sock.settimeout(5.0)
+            if self.connected_target != self.target:
+                self.connected_target = self.target
+                print(
+                    "Camera status reporting connected to "
+                    f"{self.connected_target[0]}:{self.connected_target[1]}."
+                )
             payload_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
             crc = zlib.crc32(payload_bytes) & 0xFFFFFFFF
             framed = payload_bytes + struct.pack(">I", crc)
             header = struct.pack(">I", len(framed))
-            self.sock.sendall(header)
-            self.sock.sendall(framed)
+            sock.sendall(header)
+            sock.sendall(framed)
         except OSError as exc:
             print(f"Camera status reporter error: {exc}")
-            self.close()
-
-    def _ensure_connected(self):
-        if self.sock is not None:
-            return
-        self.sock = socket.create_connection(self.target, timeout=3.0)
-        self.sock.settimeout(5.0)
-        self.connected_target = self.target
-        print(
-            "Camera status reporting connected to "
-            f"{self.connected_target[0]}:{self.connected_target[1]}."
-        )
+            self.connected_target = None
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
 
     def close(self):
-        if self.sock is not None:
-            try:
-                self.sock.close()
-            except OSError:
-                pass
-        self.sock = None
         self.connected_target = None
 
 
@@ -427,11 +425,34 @@ class CameraWebRTCManager:
                     return
                 if obj.get("signal_id") and obj.get("signal_id") != self.signal_id:
                     return
+                if self.pc is None:
+                    print("Ignoring WebRTC answer because no peer connection is active.")
+                    return
+                if self.pc.signalingState != "have-local-offer":
+                    print(
+                        "Ignoring stale WebRTC answer while peer is in signaling state "
+                        f"{self.pc.signalingState!r}."
+                    )
+                    self.reporter.send(
+                        "Ignored stale WebRTC answer.",
+                        camera_state="webrtc_answer_ignored",
+                        **self.signal_fields(),
+                    )
+                    return
                 description = RTCSessionDescription(
                     sdp=obj["sdp"],
                     type=obj.get("sdp_type", "answer"),
                 )
-                await self.pc.setRemoteDescription(description)
+                try:
+                    await self.pc.setRemoteDescription(description)
+                except InvalidStateError as exc:
+                    print(f"Ignoring invalid WebRTC answer: {exc}")
+                    self.reporter.send(
+                        "Ignored invalid WebRTC answer.",
+                        camera_state="webrtc_answer_ignored",
+                        **self.signal_fields(),
+                    )
+                    return
                 self.connection_state = "answer_applied"
                 self.reporter.send(
                     "WebRTC answer applied.",

@@ -1047,7 +1047,6 @@ def camera_view_card(title, source_name, statuses):
             html.Video(
                 id=f"webrtc-video-{slug}",
                 autoPlay=True,
-                playsInline=True,
                 muted=True,
                 controls=False,
                 style={
