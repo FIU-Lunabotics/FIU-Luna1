@@ -9,11 +9,18 @@ import urllib.error
 import urllib.request
 import zlib
 from collections import deque
+from pathlib import Path
 
 import dash
 import dash_bootstrap_components as dbc
 from dash import dcc, html
 from dash.dependencies import Input, Output, State
+from plotly import graph_objects as go
+
+try:
+    import serial
+except ImportError:  # pragma: no cover
+    serial = None
 
 
 DEFAULT_CONTROLLER_STATE = {
@@ -44,6 +51,9 @@ ROVER_STATE_FILE = "/tmp/rover_state"
 ROVER_STATE_REQUEST_FILE = "/tmp/rover_state_request"
 ROVER_STATE_MAX_AGE_SECONDS = 2.0
 STATE_CHANGE_HOLD_SECONDS = 0.5
+VALID_HALL_STATES = {"001", "101", "100", "110", "010", "011"}
+MAX_HALL_SERIES_POINTS = 600
+DEFAULT_HALL_INPUT_FILE = Path(__file__).with_name("hall_feedback.log")
 
 
 def parse_args():
@@ -79,10 +89,44 @@ def parse_args():
         default=8192,
         help="Maximum JSON payload size before CRC bytes are appended",
     )
+    parser.add_argument(
+        "--hall-motor-poles",
+        type=int,
+        default=8,
+        help="Motor pole count used to convert Hall transitions to mechanical RPM",
+    )
+    parser.add_argument(
+        "--hall-window-seconds",
+        type=float,
+        default=8.0,
+        help="Rolling time window used for Hall RPM estimation",
+    )
+    parser.add_argument(
+        "--hall-serial-port",
+        default="",
+        help="Optional serial port used for telemetry input",
+    )
+    parser.add_argument(
+        "--hall-baudrate",
+        type=int,
+        default=9600,
+        help="Serial baud rate when using --hall-serial-port",
+    )
+    parser.add_argument(
+        "--hall-input-file",
+        default="",
+        help="Optional Hall feedback log file to tail",
+    )
     return parser.parse_args()
 
 
 CONFIG = parse_args()
+
+if CONFIG.hall_motor_poles <= 0 or CONFIG.hall_motor_poles % 2 != 0:
+    raise ValueError("--hall-motor-poles must be a positive even number")
+
+if not CONFIG.hall_serial_port and not CONFIG.hall_input_file and DEFAULT_HALL_INPUT_FILE.exists():
+    CONFIG.hall_input_file = str(DEFAULT_HALL_INPUT_FILE)
 
 
 state_lock = threading.Lock()
@@ -119,6 +163,21 @@ latest_state_combo = {
     "hold_started": 0.0,
     "request_issued": False,
 }
+hall_history = deque(maxlen=MAX_HALL_SERIES_POINTS)
+hall_transition_times = deque()
+hall_log_lines = deque(maxlen=120)
+hall_state = {
+    "hall": "---",
+    "rpm": 0.0,
+    "electrical_rpm": 0.0,
+    "transitions_per_second": 0.0,
+    "last_line": "",
+    "last_update": 0.0,
+    "source": "",
+    "valid_samples": 0,
+    "invalid_lines": 0,
+    "enabled": bool(CONFIG.hall_serial_port or CONFIG.hall_input_file),
+}
 
 
 def log(message: str):
@@ -126,6 +185,13 @@ def log(message: str):
     line = f"[{timestamp}] {message}"
     with state_lock:
         log_lines.append(line)
+
+
+def hall_log(message: str):
+    timestamp = time.strftime("%H:%M:%S")
+    line = f"[{timestamp}] {message}"
+    with state_lock:
+        hall_log_lines.appendleft(line)
 
 
 def parse_target(target: str):
@@ -152,6 +218,120 @@ remote_state_cache = {
     "rover_state": None,
     "rover_request": None,
 }
+
+
+def hall_to_int(hall_value):
+    if hall_value not in VALID_HALL_STATES:
+        return None
+    return int(hall_value, 2)
+
+
+def parse_hall_state(line):
+    compact = "".join(ch for ch in line if ch in "01")
+    if len(compact) < 3:
+        return None
+
+    candidates = [compact[i : i + 3] for i in range(len(compact) - 2)]
+    for candidate in reversed(candidates):
+        if candidate in VALID_HALL_STATES:
+            return candidate
+    return None
+
+
+def prune_hall_transitions(now, window_seconds):
+    while hall_transition_times and (now - hall_transition_times[0]) > window_seconds:
+        hall_transition_times.popleft()
+
+
+def update_hall_from_line(line, source):
+    now = time.time()
+    parsed_state = parse_hall_state(line)
+
+    with state_lock:
+        hall_state["last_line"] = line.strip()
+        hall_state["source"] = source
+        hall_state["last_update"] = now
+
+        if parsed_state is None:
+            hall_state["invalid_lines"] += 1
+            return
+
+        last_hall = hall_state["hall"]
+        if parsed_state != last_hall and last_hall in VALID_HALL_STATES:
+            hall_transition_times.append(now)
+
+        prune_hall_transitions(now, CONFIG.hall_window_seconds)
+
+        transitions_per_second = (
+            len(hall_transition_times) / CONFIG.hall_window_seconds if CONFIG.hall_window_seconds else 0.0
+        )
+        electrical_rpm = transitions_per_second * 10.0
+        mechanical_rpm = electrical_rpm / (CONFIG.hall_motor_poles / 2.0)
+
+        hall_state["hall"] = parsed_state
+        hall_state["transitions_per_second"] = transitions_per_second
+        hall_state["electrical_rpm"] = electrical_rpm
+        hall_state["rpm"] = mechanical_rpm
+        hall_state["valid_samples"] += 1
+
+        hall_history.append(
+            {
+                "t": now,
+                "rpm": mechanical_rpm,
+                "electrical_rpm": electrical_rpm,
+                "hall": parsed_state,
+                "hall_value": hall_to_int(parsed_state),
+            }
+        )
+
+
+def hall_serial_reader():
+    if serial is None:
+        hall_log("pyserial is not installed, so serial telemetry is unavailable.")
+        return
+
+    try:
+        with serial.Serial(CONFIG.hall_serial_port, CONFIG.hall_baudrate, timeout=1.0) as ser:
+            hall_log(f"reading telemetry from {CONFIG.hall_serial_port} @ {CONFIG.hall_baudrate}")
+            while True:
+                raw = ser.readline()
+                if not raw:
+                    continue
+                line = raw.decode("utf-8", errors="ignore")
+                update_hall_from_line(line, f"serial:{CONFIG.hall_serial_port}")
+    except Exception as exc:  # pragma: no cover
+        hall_log(f"serial telemetry stopped: {exc}")
+
+
+def hall_file_reader():
+    path = Path(CONFIG.hall_input_file)
+    if not path.exists():
+        hall_log(f"telemetry log not found: {path}")
+        return
+
+    hall_log(f"tailing telemetry log {path}")
+    with path.open("r", encoding="utf-8", errors="ignore") as handle:
+        handle.seek(0, 2)
+        while True:
+            line = handle.readline()
+            if not line:
+                time.sleep(0.1)
+                continue
+            update_hall_from_line(line, f"file:{path.name}")
+
+
+def start_hall_reader_thread():
+    if CONFIG.hall_serial_port:
+        target = hall_serial_reader
+    elif CONFIG.hall_input_file:
+        target = hall_file_reader
+    else:
+        hall_log("Telemetry disabled. Set --hall-serial-port or --hall-input-file to enable it.")
+        return None
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    return thread
 
 
 def read_exact(sock: socket.socket, size: int):
@@ -658,6 +838,221 @@ def age_text(seconds):
     return f"{seconds:.2f}s ago"
 
 
+def build_telemetry_rpm_figure(points):
+    figure = go.Figure()
+    if points:
+        base_time = points[0]["t"]
+        x_values = [point["t"] - base_time for point in points]
+        y_values = [point["rpm"] for point in points]
+        figure.add_trace(
+            go.Scatter(
+                x=x_values,
+                y=y_values,
+                mode="lines",
+                name="Mechanical RPM",
+                line={"color": "#0b3d91", "width": 3},
+                fill="tozeroy",
+                fillcolor="rgba(79, 141, 247, 0.12)",
+            )
+        )
+
+    figure.update_layout(
+        paper_bgcolor="#f4f7fb",
+        plot_bgcolor="#ffffff",
+        margin={"l": 40, "r": 20, "t": 18, "b": 32},
+        xaxis_title="Seconds in rolling buffer",
+        yaxis_title="RPM",
+        font={"family": "JetBrains Mono, monospace", "color": "#142033"},
+        xaxis={"gridcolor": "#dbe7f7", "zerolinecolor": "#dbe7f7"},
+        yaxis={"gridcolor": "#dbe7f7", "zerolinecolor": "#dbe7f7"},
+    )
+    return figure
+
+
+def build_telemetry_hall_figure(points):
+    figure = go.Figure()
+    if points:
+        base_time = points[0]["t"]
+        x_values = [point["t"] - base_time for point in points]
+        y_values = [point["hall_value"] for point in points]
+        labels = [point["hall"] for point in points]
+        figure.add_trace(
+            go.Scatter(
+                x=x_values,
+                y=y_values,
+                mode="lines+markers",
+                name="Hall state",
+                text=labels,
+                hovertemplate="t=%{x:.2f}s<br>hall=%{text}<extra></extra>",
+                line={"shape": "hv", "color": "#fc3d21", "width": 2},
+                marker={"size": 6, "color": "#0b3d91"},
+            )
+        )
+
+    figure.update_layout(
+        paper_bgcolor="#f4f7fb",
+        plot_bgcolor="#ffffff",
+        margin={"l": 40, "r": 20, "t": 18, "b": 32},
+        xaxis_title="Seconds in rolling buffer",
+        yaxis_title="3-bit Hall value",
+        font={"family": "JetBrains Mono, monospace", "color": "#142033"},
+        xaxis={"gridcolor": "#dbe7f7", "zerolinecolor": "#dbe7f7"},
+        yaxis={"gridcolor": "#dbe7f7", "zerolinecolor": "#dbe7f7"},
+    )
+    return figure
+
+
+def build_telemetry_view(snapshot, points, logs):
+    source_text = snapshot["source"] or "waiting for telemetry"
+    if not snapshot["enabled"]:
+        source_text = "disabled"
+
+    update_text = (
+        "last update: waiting"
+        if not snapshot["last_update"]
+        else f"last update: {age_text(max(0.0, time.time() - snapshot['last_update']))}"
+    )
+
+    return html.Div(
+        [
+            dbc.Row(
+                [
+                    dbc.Col(
+                        dbc.Card(
+                            dbc.CardBody(
+                                [
+                                    html.Div("Telemetry Config", className="controller-panel-title"),
+                                    html.Div(
+                                        f"motor poles: {CONFIG.hall_motor_poles}",
+                                        className="controller-meta-line",
+                                    ),
+                                    html.Div(
+                                        f"pole pairs: {CONFIG.hall_motor_poles // 2}",
+                                        className="controller-meta-line",
+                                    ),
+                                    html.Div(
+                                        f"window: {CONFIG.hall_window_seconds:.1f}s",
+                                        className="controller-meta-line",
+                                    ),
+                                ]
+                            ),
+                            className="h-100",
+                        ),
+                        md=4,
+                    ),
+                    dbc.Col(
+                        dbc.Card(
+                            dbc.CardBody(
+                                [
+                                    html.Div("Telemetry Source", className="controller-panel-title"),
+                                    html.Div(source_text, className="controller-meta-line"),
+                                    html.Div(
+                                        (
+                                            f"serial: {CONFIG.hall_serial_port}"
+                                            if CONFIG.hall_serial_port
+                                            else f"log: {CONFIG.hall_input_file or 'not set'}"
+                                        ),
+                                        className="controller-meta-line",
+                                    ),
+                                    html.Div(update_text, className="controller-meta-line"),
+                                ]
+                            ),
+                            className="h-100",
+                        ),
+                        md=4,
+                    ),
+                    dbc.Col(
+                        dbc.Card(
+                            dbc.CardBody(
+                                [
+                                    html.Div("Telemetry Stats", className="controller-panel-title"),
+                                    html.Div(
+                                        f"valid lines: {snapshot['valid_samples']}",
+                                        className="controller-meta-line",
+                                    ),
+                                    html.Div(
+                                        f"invalid lines: {snapshot['invalid_lines']}",
+                                        className="controller-meta-line",
+                                    ),
+                                    html.Div(
+                                        f"points buffered: {len(points)}",
+                                        className="controller-meta-line",
+                                    ),
+                                ]
+                            ),
+                            className="h-100",
+                        ),
+                        md=4,
+                    ),
+                ],
+                className="g-3 mb-3",
+            ),
+            dbc.Row(
+                [
+                    dbc.Col(
+                        dbc.Card(
+                            dbc.CardBody(
+                                [
+                                    html.Div("Estimated Mechanical RPM", className="controller-panel-title"),
+                                    dcc.Graph(
+                                        id="telemetry-rpm-graph",
+                                        figure=build_telemetry_rpm_figure(points),
+                                        config={"displayModeBar": False},
+                                        className="telemetry-graph",
+                                    ),
+                                    html.Div("Hall State Timeline", className="controller-panel-title telemetry-subtitle"),
+                                    dcc.Graph(
+                                        id="telemetry-hall-graph",
+                                        figure=build_telemetry_hall_figure(points),
+                                        config={"displayModeBar": False},
+                                        className="telemetry-graph",
+                                    ),
+                                ]
+                            ),
+                            className="h-100",
+                        ),
+                        md=8,
+                    ),
+                    dbc.Col(
+                        dbc.Card(
+                            dbc.CardBody(
+                                [
+                                    html.Div("Latest Feedback", className="controller-panel-title"),
+                                    html.H2(f"{snapshot['rpm']:.2f} RPM", className="telemetry-rpm-readout"),
+                                    html.Div(
+                                        f"electrical rpm: {snapshot['electrical_rpm']:.2f}",
+                                        className="controller-meta-line",
+                                    ),
+                                    html.Div(
+                                        f"hall transitions/sec: {snapshot['transitions_per_second']:.2f}",
+                                        className="controller-meta-line",
+                                    ),
+                                    html.Div(
+                                        f"hall state: {snapshot['hall']}",
+                                        className="controller-meta-line",
+                                    ),
+                                    html.Pre(
+                                        snapshot["last_line"] or "No telemetry line received yet.",
+                                        className="telemetry-pre",
+                                    ),
+                                    html.Div("Reader Logs", className="controller-panel-title telemetry-subtitle"),
+                                    html.Pre(
+                                        "\n".join(logs) if logs else "Telemetry reader is waiting for data.",
+                                        className="telemetry-pre telemetry-log",
+                                    ),
+                                ]
+                            ),
+                            className="h-100",
+                        ),
+                        md=4,
+                    ),
+                ],
+                className="g-3",
+            ),
+        ]
+    )
+
+
 def build_main_controller_view(controller, combo_text, mode, rover_state):
     actuator_state = (
         "Extend" if int(controller["dY"]) < 0
@@ -936,6 +1331,7 @@ app.layout = dbc.Container(
             [
                 dbc.Tab(label="Controller", tab_id="controller"),
                 dbc.Tab(label="Jetson Status", tab_id="status"),
+                dbc.Tab(label="Telemetry", tab_id="telemetry"),
                 dbc.Tab(label="Logs / Raw", tab_id="logs"),
             ],
             id="tabs",
@@ -1017,10 +1413,17 @@ def update_ui(_, active_tab, controller_view):
         status_log = []
         logs_snapshot = []
         raw_snapshot = []
+        telemetry_snapshot = {}
+        telemetry_points = []
+        telemetry_logs = []
 
         if active_tab == "status":
             statuses = dict(status_sources)
             status_log = list(status_history)
+        elif active_tab == "telemetry":
+            telemetry_snapshot = dict(hall_state)
+            telemetry_points = list(hall_history)
+            telemetry_logs = list(hall_log_lines)
         elif active_tab == "logs":
             logs_snapshot = list(log_lines)
             raw_snapshot = list(raw_packets)
@@ -1163,6 +1566,8 @@ def update_ui(_, active_tab, controller_view):
                 ),
             ]
         )
+    elif active_tab == "telemetry":
+        content = build_telemetry_view(telemetry_snapshot, telemetry_points, telemetry_logs)
     else:
         log_text = "\n".join(logs_snapshot[-200:])
         raw_text = "\n".join(
@@ -1236,11 +1641,16 @@ def start_proxy_server_thread():
     return thread
 
 
+def start_background_threads():
+    start_hall_reader_thread()
+    return start_proxy_server_thread()
+
+
 def run_browser_mode():
     # Dash's hot reloader starts a parent supervisor process and a child process.
     # Only the child should own the packet listener socket.
     if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
-        start_proxy_server_thread()
+        start_background_threads()
     print(
         "Starting dashboard UI on "
         f"http://{CONFIG.ui_host}:{CONFIG.ui_port} | "
@@ -1250,7 +1660,7 @@ def run_browser_mode():
 
 
 def run_desktop_mode():
-    start_proxy_server_thread()
+    start_background_threads()
     if os.environ.get("SNAP_NAME") == "code":
         # VS Code's snap injects GTK/GIO paths that break pywebview's desktop backend.
         for key in list(os.environ):
