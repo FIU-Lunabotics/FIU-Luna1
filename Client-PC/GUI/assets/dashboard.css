@@ -16,6 +16,16 @@ body {
     color: var(--text);
     font-family: "JetBrains Mono", monospace;
 }
+.dashboard-logo {
+  height: 92px;
+  width: auto;
+  display: block;
+  margin: 10px auto 12px;
+  border: none;
+  outline: none;
+  border-radius: 18px;
+  box-shadow: 0 10px 26px rgba(6, 33, 52, 0.2);
+}
 .dashboard-title {
   color: var(--nasa-blue);
   text-align: center;
@@ -23,8 +33,7 @@ body {
   font-weight: 800;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  margin-bottom: 8px;
-    
+  margin: 0 0 8px;
 }
 
 .container-fluid {
@@ -37,6 +46,12 @@ body {
   margin: 0 auto 18px;
   font-family: "Orbitron", sans-serif;
   max-width: 900px;
+}
+
+@media (max-width: 768px) {
+  .dashboard-logo {
+    height: 74px;
+  }
 }
 
 #status-bar {

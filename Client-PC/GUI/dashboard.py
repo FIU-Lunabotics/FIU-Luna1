@@ -58,7 +58,7 @@ DEFAULT_HALL_INPUT_FILE = Path(__file__).with_name("hall_feedback.log")
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="FIU Luna1 teleop dashboard. Monitors packets and can proxy them to the server."
+        description="FIU Lunabotics Rover Control. Monitors packets and can proxy them to the server."
     )
     parser.add_argument("--listen-host", default="0.0.0.0", help="TCP host for the dashboard packet listener")
     parser.add_argument("--listen-port", type=int, default=8090, help="TCP port for incoming packets from Go clients")
@@ -1276,11 +1276,15 @@ def build_debug_controller_view(controller, combo_state, requested_mode, combo_t
 
 
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.CYBORG])
-app.title = "FIU Luna1 Teleop Dashboard"
+app.title = "FIU Lunabotics Rover Control"
 app.layout = dbc.Container(
     fluid=True,
     children=[
-        html.H2("FIU Luna1 Teleop Dashboard", className="dashboard-title"),
+        html.Img(
+            src=app.get_asset_url("lunaboticslogo.png"),
+            className="dashboard-logo",
+        ),
+        html.H2("FIU Lunabotics Rover Control", className="dashboard-title"),
         html.Div(
             "Monitor the repo's wire protocol live and optionally proxy packets to Server-Pi.",
             className="dashboard-description",
@@ -1647,16 +1651,22 @@ def start_background_threads():
 
 
 def run_browser_mode():
-    # Dash's hot reloader starts a parent supervisor process and a child process.
-    # Only the child should own the packet listener socket.
-    if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+    # When the reloader is disabled, Werkzeug never sets WERKZEUG_RUN_MAIN.
+    # Start the background listeners in the single main process in that case.
+    if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or "WERKZEUG_RUN_MAIN" not in os.environ:
         start_background_threads()
     print(
         "Starting dashboard UI on "
         f"http://{CONFIG.ui_host}:{CONFIG.ui_port} | "
         f"packet listener on {CONFIG.listen_host}:{CONFIG.listen_port}"
     )
-    app.run(host=CONFIG.ui_host, port=CONFIG.ui_port, debug=True, dev_tools_hot_reload=True)
+    app.run(
+        host=CONFIG.ui_host,
+        port=CONFIG.ui_port,
+        debug=False,
+        use_reloader=False,
+        dev_tools_hot_reload=False,
+    )
 
 
 def run_desktop_mode():
@@ -1724,7 +1734,7 @@ def run_desktop_mode():
         f"packet listener={CONFIG.listen_host}:{CONFIG.listen_port}"
     )
     window = webview.create_window(
-        "FIU Luna1 Teleop Dashboard",
+        "FIU Lunabotics Rover Control",
         ui_url,
         width=CONFIG.window_width,
         height=CONFIG.window_height,
