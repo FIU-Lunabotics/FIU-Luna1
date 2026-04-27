@@ -15,6 +15,7 @@ import dash
 import dash_bootstrap_components as dbc
 from dash import dcc, html
 from dash.dependencies import Input, Output, State
+from flask import jsonify, request
 from plotly import graph_objects as go
 
 try:
@@ -90,6 +91,36 @@ def parse_args():
         help="Maximum JSON payload size before CRC bytes are appended",
     )
     parser.add_argument(
+        "--camera-one-label",
+        default="Camera 1",
+        help="Label for the first camera panel in the dashboard.",
+    )
+    parser.add_argument(
+        "--camera-two-label",
+        default="Camera 2",
+        help="Label for the second camera panel in the dashboard.",
+    )
+    parser.add_argument(
+        "--camera-one-url",
+        default="",
+        help="Deprecated legacy HTTP camera URL override for the first camera panel.",
+    )
+    parser.add_argument(
+        "--camera-two-url",
+        default="",
+        help="Deprecated legacy HTTP camera URL override for the second camera panel.",
+    )
+    parser.add_argument(
+        "--camera-one-source",
+        default="jetson-camera-1",
+        help="Status source name associated with camera panel one.",
+    )
+    parser.add_argument(
+        "--camera-two-source",
+        default="jetson-camera-2",
+        help="Status source name associated with camera panel two.",
+    )
+    parser.add_argument(
         "--hall-motor-poles",
         type=int,
         default=8,
@@ -142,6 +173,7 @@ latest_controller_meta = {
     "packet_type": "none",
 }
 status_sources = {}
+camera_signals = {}
 status_history = deque(maxlen=40)
 log_lines = deque(maxlen=300)
 raw_packets = deque(maxlen=60)
@@ -153,6 +185,7 @@ metrics = {
     "forward_failures": 0,
     "controller_packets": 0,
     "status_packets": 0,
+    "camera_signal_packets": 0,
     "crc_failures": 0,
     "json_failures": 0,
 }
@@ -361,6 +394,34 @@ def verify_packet(packet: bytes):
     return payload, actual == expected
 
 
+def send_framed_packet(host, port, payload):
+    payload_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    crc = zlib.crc32(payload_bytes) & 0xFFFFFFFF
+    framed = payload_bytes + struct.pack(">I", crc)
+    header = struct.pack(">I", len(framed))
+    sock = socket.create_connection((host, port), timeout=3.0)
+    try:
+        sock.settimeout(5.0)
+        sock.sendall(header)
+        sock.sendall(framed)
+    finally:
+        sock.close()
+
+
+def slugify_source(source):
+    return "".join(ch if ch.isalnum() else "-" for ch in source.lower()).strip("-") or "camera"
+
+
+def signal_target_for_source(source):
+    signal = camera_signals.get(source) or {}
+    status = status_sources.get(source) or {}
+    host = signal.get("signal_host") or status.get("signal_host") or ""
+    port = signal.get("signal_port") or status.get("signal_port") or 0
+    if not host or not port:
+        return None
+    return host, int(port)
+
+
 def display_mode_label(rover_state, rover_request):
     if rover_state and rover_state.get("valid"):
         if is_fresh_state_info(rover_state):
@@ -477,6 +538,19 @@ def read_rover_state_file(path):
     }
 
 
+def state_age_text(timestamp_ms):
+    if not timestamp_ms:
+        return "unknown"
+    return age_text(max(0.0, time.time() - (timestamp_ms / 1000.0)))
+
+
+def is_fresh_state_info(info):
+    if not info or not info.get("valid") or not info.get("timestamp"):
+        return False
+    age_seconds = time.time() - (int(info["timestamp"]) / 1000.0)
+    return 0.0 <= age_seconds <= ROVER_STATE_MAX_AGE_SECONDS
+
+
 def fetch_remote_state_snapshot():
     if not STATE_ENDPOINT_URL:
         return None, None
@@ -502,19 +576,6 @@ def fetch_remote_state_snapshot():
         }
     )
     return remote_state_cache["rover_state"], remote_state_cache["rover_request"]
-
-
-def state_age_text(timestamp_ms):
-    if not timestamp_ms:
-        return "unknown"
-    return age_text(max(0.0, time.time() - (timestamp_ms / 1000.0)))
-
-
-def is_fresh_state_info(info):
-    if not info or not info.get("valid") or not info.get("timestamp"):
-        return False
-    age_seconds = time.time() - (int(info["timestamp"]) / 1000.0)
-    return 0.0 <= age_seconds <= ROVER_STATE_MAX_AGE_SECONDS
 
 
 def record_raw_packet(peer, total_len, packet_type, source, crc_ok, forwarded, packet):
@@ -592,11 +653,35 @@ def update_state_from_packet(peer, total_len, packet, forwarded):
                     packet_type = "status"
                     source = obj.get("source") or peer
                     metrics["status_packets"] += 1
+                    details = []
+                    if obj.get("component"):
+                        details.append(f"component={obj.get('component')}")
+                    if obj.get("camera_state"):
+                        details.append(f"state={obj.get('camera_state')}")
+                    if obj.get("camera_source"):
+                        details.append(f"path={obj.get('camera_source')}")
+                    if obj.get("frame_width") and obj.get("frame_height"):
+                        details.append(
+                            f"frame={obj.get('frame_width')}x{obj.get('frame_height')}"
+                        )
+                    if obj.get("fps"):
+                        details.append(f"fps={obj.get('fps')}")
+                    if obj.get("frame_count"):
+                        details.append(f"frames={obj.get('frame_count')}")
+                    if obj.get("signal_host") and obj.get("signal_port"):
+                        details.append(f"signal={obj.get('signal_host')}:{obj.get('signal_port')}")
+                    if obj.get("webrtc_state"):
+                        details.append(f"webrtc={obj.get('webrtc_state')}")
                     status_sources[source] = {
                         "message": obj.get("message", ""),
                         "ts": obj.get("ts", 0),
                         "peer": peer,
                         "last_rx": now,
+                        "details": ", ".join(details),
+                        "signal_host": obj.get("signal_host", ""),
+                        "signal_port": obj.get("signal_port", 0),
+                        "signal_id": obj.get("signal_id", ""),
+                        "webrtc_state": obj.get("webrtc_state", ""),
                     }
                     status_history.appendleft(
                         {
@@ -605,6 +690,7 @@ def update_state_from_packet(peer, total_len, packet, forwarded):
                             "peer": peer,
                             "ts": obj.get("ts", 0),
                             "received": now,
+                            "details": ", ".join(details),
                         }
                     )
                     latest_controller_meta.update(
@@ -618,6 +704,58 @@ def update_state_from_packet(peer, total_len, packet, forwarded):
                         }
                     )
                     log_message = f"Status packet from {source}: {obj.get('message', '')}"
+                    record_raw_packet(peer, total_len, packet_type, source, True, forwarded, packet)
+                elif obj.get("type") == "camera_signal":
+                    packet_type = "camera_signal"
+                    source = obj.get("source") or peer
+                    metrics["camera_signal_packets"] += 1
+                    camera_signals[source] = {
+                        "signal_kind": obj.get("signal_kind", ""),
+                        "signal_id": obj.get("signal_id", ""),
+                        "sdp_type": obj.get("sdp_type", ""),
+                        "sdp": obj.get("sdp", ""),
+                        "signal_host": obj.get("signal_host", ""),
+                        "signal_port": obj.get("signal_port", 0),
+                        "ts": obj.get("ts", 0),
+                        "last_rx": now,
+                    }
+                    status_entry = status_sources.get(source, {})
+                    details = status_entry.get("details", "")
+                    details_bits = [bit for bit in details.split(", ") if bit]
+                    if obj.get("signal_host") and obj.get("signal_port"):
+                        details_bits = [
+                            bit for bit in details_bits if not bit.startswith("signal=")
+                        ]
+                        details_bits.append(f"signal={obj.get('signal_host')}:{obj.get('signal_port')}")
+                    details_bits = [
+                        bit for bit in details_bits if not bit.startswith("webrtc=")
+                    ]
+                    details_bits.append(f"webrtc={obj.get('signal_kind', 'signal')}")
+                    status_sources[source] = {
+                        **status_entry,
+                        "message": status_entry.get("message", "WebRTC signaling available."),
+                        "ts": max(status_entry.get("ts", 0), obj.get("ts", 0)),
+                        "peer": peer,
+                        "last_rx": now,
+                        "details": ", ".join(details_bits),
+                        "signal_host": obj.get("signal_host", status_entry.get("signal_host", "")),
+                        "signal_port": obj.get("signal_port", status_entry.get("signal_port", 0)),
+                        "signal_id": obj.get("signal_id", status_entry.get("signal_id", "")),
+                        "webrtc_state": obj.get("signal_kind", status_entry.get("webrtc_state", "")),
+                    }
+                    latest_controller_meta.update(
+                        {
+                            "crc_ok": True,
+                            "bytes": total_len,
+                            "peer": peer,
+                            "last_rx": now,
+                            "forwarded": forwarded,
+                            "packet_type": packet_type,
+                        }
+                    )
+                    log_message = (
+                        f"Camera signal from {source}: {obj.get('signal_kind', 'unknown')}"
+                    )
                     record_raw_packet(peer, total_len, packet_type, source, True, forwarded, packet)
                 else:
                     packet_type = "controller"
@@ -838,6 +976,302 @@ def age_text(seconds):
     return f"{seconds:.2f}s ago"
 
 
+def build_main_controller_view(controller, combo_text, mode, rover_state, camera_panels):
+    actuator_state = (
+        "Extend" if int(controller["dY"]) < 0
+        else "Retract" if int(controller["dY"]) > 0
+        else "Idle"
+    )
+    vibration_input = "Y pressed" if controller["N"] == 1 else "Idle"
+    rover_state_label = rover_state.get("state", "unknown") if rover_state and rover_state.get("valid") else "unknown"
+
+    return html.Div(
+        [
+            dbc.Row(
+                [
+                    dbc.Col(
+                        dbc.Card(
+                            dbc.CardBody(
+                                [
+                                    html.Div("Left Control", className="controller-panel-title"),
+                                    joystick_widget("Left Stick", int(controller["LjoyX"]), int(controller["LjoyY"])),
+                                    trigger_bar("Left Trigger", int(controller["LT"])),
+                                    html.Div(
+                                        f"LB: {'Pressed' if controller['LB'] == 1 else 'Idle'}",
+                                        className="controller-meta-line",
+                                    ),
+                                    html.Div(
+                                        f"LS: {'Pressed' if controller['LS'] == 1 else 'Idle'}",
+                                        className="controller-meta-line",
+                                    ),
+                                ]
+                            ),
+                            className="controller-panel h-100",
+                        ),
+                        md=4,
+                    ),
+                    dbc.Col(
+                        dbc.Card(
+                            dbc.CardBody(
+                                [
+                                    html.Div("Right Control", className="controller-panel-title"),
+                                    joystick_widget("Right Stick", int(controller["RjoyX"]), int(controller["RjoyY"])),
+                                    trigger_bar("Right Trigger", int(controller["RT"])),
+                                    html.Div(
+                                        f"RB: {'Pressed' if controller['RB'] == 1 else 'Idle'}",
+                                        className="controller-meta-line",
+                                    ),
+                                    html.Div(
+                                        f"RS: {'Pressed' if controller['RS'] == 1 else 'Idle'}",
+                                        className="controller-meta-line",
+                                    ),
+                                ]
+                            ),
+                            className="controller-panel h-100",
+                        ),
+                        md=4,
+                    ),
+                    dbc.Col(
+                        dbc.Card(
+                            dbc.CardBody(
+                                [
+                                    html.Div("Xbox Mapping", className="controller-panel-title"),
+                                    html.Div(
+                                        [
+                                            html.Div(
+                                                "Y",
+                                                className=f"face-button face-button-y{' active' if controller['N'] == 1 else ''}",
+                                            ),
+                                            html.Div(
+                                                "X",
+                                                className=f"face-button face-button-x{' active' if controller['W'] == 1 else ''}",
+                                            ),
+                                            html.Div(
+                                                "B",
+                                                className=f"face-button face-button-b{' active' if controller['E'] == 1 else ''}",
+                                            ),
+                                            html.Div(
+                                                "A",
+                                                className=f"face-button face-button-a{' active' if controller['S'] == 1 else ''}",
+                                            ),
+                                        ],
+                                        className="face-button-grid",
+                                    ),
+                                    html.Div(
+                                        [
+                                            html.Div(
+                                                "U",
+                                                className=f"dpad-cell dpad-up{' active' if controller['dY'] < 0 else ''}",
+                                            ),
+                                            html.Div(
+                                                "L",
+                                                className=f"dpad-cell dpad-left{' active' if controller['dX'] < 0 else ''}",
+                                            ),
+                                            html.Div(
+                                                "R",
+                                                className=f"dpad-cell dpad-right{' active' if controller['dX'] > 0 else ''}",
+                                            ),
+                                            html.Div(
+                                                "D",
+                                                className=f"dpad-cell dpad-down{' active' if controller['dY'] > 0 else ''}",
+                                            ),
+                                        ],
+                                        className="dpad-grid",
+                                    ),
+                                    html.Div(
+                                        [
+                                            html.Div(f"DPad: x={controller['dX']} y={controller['dY']}", className="controller-meta-line"),
+                                            html.Div(f"Actuator: {actuator_state}", className="controller-meta-line"),
+                                            html.Div(f"Vibration Input: {vibration_input}", className="controller-meta-line"),
+                                            html.Div(f"Rover: {rover_state_label}", className="controller-meta-line"),
+                                            html.Div(f"Mode: {mode}", className="controller-meta-line"),
+                                            html.Div(f"State Combo: {combo_text}", className="controller-meta-line"),
+                                        ],
+                                        className="subsystem-stack",
+                                    ),
+                                ]
+                            ),
+                            className="controller-panel h-100",
+                        ),
+                        md=4,
+                    ),
+                ],
+                className="g-3",
+            ),
+            dbc.Row(camera_panels, className="mt-2"),
+        ]
+    )
+
+
+def build_debug_controller_view(controller, combo_state, requested_mode, combo_text, rover_state, rover_request):
+    return dbc.Row(
+        [
+            dbc.Col(
+                [
+                    joystick_widget("Left Stick", int(controller["LjoyX"]), int(controller["LjoyY"])),
+                    trigger_bar("Left Trigger", int(controller["LT"])),
+                ],
+                md=4,
+            ),
+            dbc.Col(
+                [
+                    joystick_widget("Right Stick", int(controller["RjoyX"]), int(controller["RjoyY"])),
+                    trigger_bar("Right Trigger", int(controller["RT"])),
+                ],
+                md=4,
+            ),
+            dbc.Col(
+                dbc.Card(
+                    dbc.CardBody(
+                        [
+                            html.Div("Buttons", style={"fontWeight": "bold", "marginBottom": "10px"}),
+                            button_light("N", controller["N"] == 1),
+                            button_light("E", controller["E"] == 1),
+                            button_light("S", controller["S"] == 1),
+                            button_light("W", controller["W"] == 1),
+                            html.Hr(),
+                            button_light("LB", controller["LB"] == 1),
+                            button_light("RB", controller["RB"] == 1),
+                            button_light("LS", controller["LS"] == 1),
+                            button_light("RS", controller["RS"] == 1),
+                            html.Hr(),
+                            button_light("SELECT", controller["SELECT"] == 1),
+                            button_light("START", controller["START"] == 1),
+                            html.Hr(),
+                            html.Div(
+                                f"DPad: x={controller['dX']} y={controller['dY']}",
+                                style={"fontFamily": "monospace"},
+                            ),
+                            html.Div(
+                                f"Source: {controller.get('source', 'pc')}",
+                                style={"fontFamily": "monospace", "marginTop": "8px"},
+                            ),
+                            html.Div(
+                                f"Timestamp: {controller.get('ts', 0)}",
+                                style={"fontFamily": "monospace"},
+                            ),
+                            html.Hr(),
+                            html.Div("State Switch", style={"fontWeight": "bold", "marginBottom": "10px"}),
+                            html.Div(
+                                f"Combo status: {combo_state}",
+                                style={"fontFamily": "monospace"},
+                            ),
+                            html.Div(
+                                f"Requested mode: {requested_mode or 'none'}",
+                                style={"fontFamily": "monospace"},
+                            ),
+                            html.Div(
+                                combo_text,
+                                style={"fontFamily": "monospace"},
+                            ),
+                            html.Div(
+                                f"Pending request: "
+                                f"{rover_request.get('state', 'none') if is_fresh_state_info(rover_request) else 'none'}",
+                                style={"fontFamily": "monospace", "marginTop": "8px"},
+                            ),
+                            html.Div(
+                                (
+                                    f"Pending seq/source: "
+                                    f"{rover_request.get('seq', '-')}/{rover_request.get('source', '-')}"
+                                    if is_fresh_state_info(rover_request)
+                                    else "Pending seq/source: -"
+                                ),
+                                style={"fontFamily": "monospace"},
+                            ),
+                            html.Div(
+                                (
+                                    f"Rover state: {rover_state.get('state', 'unknown')}"
+                                    if rover_state and rover_state.get("valid")
+                                    else "Rover state: unknown"
+                                ),
+                                style={"fontFamily": "monospace", "marginTop": "8px"},
+                            ),
+                            html.Div(
+                                (
+                                    f"Rover state age: {state_age_text(rover_state.get('timestamp'))}"
+                                    if rover_state and rover_state.get("valid")
+                                    else "Rover state age: unknown"
+                                ),
+                                style={"fontFamily": "monospace"},
+                            ),
+                        ]
+                    )
+                ),
+                md=4,
+            ),
+        ]
+    )
+
+
+def camera_view_card(title, source_name, statuses):
+    entry = statuses.get(source_name)
+    slug = slugify_source(source_name)
+    if entry:
+        age = time.time() - entry["last_rx"]
+        status_lines = [
+            html.Div(f"source: {source_name}", style={"fontFamily": "monospace"}),
+            html.Div(f"message: {entry.get('message', '-')}", style={"fontFamily": "monospace"}),
+            html.Div(f"details: {entry.get('details', '-') or '-'}", style={"fontFamily": "monospace"}),
+            html.Div(f"age: {age_text(age)}", style={"fontFamily": "monospace"}),
+        ]
+    else:
+        status_lines = [
+            html.Div(f"source: {source_name}", style={"fontFamily": "monospace"}),
+            html.Div("message: waiting for camera status", style={"fontFamily": "monospace"}),
+            html.Div("details: -", style={"fontFamily": "monospace"}),
+            html.Div("age: never", style={"fontFamily": "monospace"}),
+        ]
+
+    viewer = html.Div(
+        [
+            html.Video(
+                id=f"webrtc-video-{slug}",
+                autoPlay=True,
+                muted=True,
+                controls=False,
+                style={
+                    "width": "100%",
+                    "height": "260px",
+                    "objectFit": "cover",
+                    "borderRadius": "12px",
+                    "border": "1px solid #263247",
+                    "background": "#05070b",
+                },
+                **{"data-webrtc-video": source_name},
+            ),
+            html.Div(
+                "Waiting for WebRTC session.",
+                id=f"webrtc-state-{slug}",
+                style={
+                    "fontFamily": "monospace",
+                    "marginTop": "10px",
+                    "color": "#9fb2c8",
+                },
+                **{"data-webrtc-state": source_name},
+            ),
+        ],
+        **{"data-webrtc-source": source_name},
+    )
+
+    return dbc.Card(
+        dbc.CardBody(
+            [
+                html.Div(title, style={"fontWeight": "bold", "marginBottom": "10px"}),
+                viewer,
+                html.Div(
+                    "transport: WebRTC",
+                    style={"fontFamily": "monospace", "marginTop": "10px", "marginBottom": "10px"},
+                ),
+                html.Div(status_lines),
+            ],
+            style={
+                "minHeight": "420px",
+            },
+        ),
+        className="mb-3",
+    )
+
+
 def build_telemetry_rpm_figure(points):
     figure = go.Figure()
     if points:
@@ -1052,229 +1486,6 @@ def build_telemetry_view(snapshot, points, logs):
         ]
     )
 
-
-def build_main_controller_view(controller, combo_text, mode, rover_state):
-    actuator_state = (
-        "Extend" if int(controller["dY"]) < 0
-        else "Retract" if int(controller["dY"]) > 0
-        else "Idle"
-    )
-    vibration_input = "Y pressed" if controller["N"] == 1 else "Idle"
-    rover_state_label = rover_state.get("state", "unknown") if rover_state and rover_state.get("valid") else "unknown"
-
-    return dbc.Row(
-        [
-            dbc.Col(
-                dbc.Card(
-                    dbc.CardBody(
-                        [
-                            html.Div("Left Control", className="controller-panel-title"),
-                            joystick_widget("Left Stick", int(controller["LjoyX"]), int(controller["LjoyY"])),
-                            trigger_bar("Left Trigger", int(controller["LT"])),
-                            html.Div(
-                                f"LB: {'Pressed' if controller['LB'] == 1 else 'Idle'}",
-                                className="controller-meta-line",
-                            ),
-                            html.Div(
-                                f"LS: {'Pressed' if controller['LS'] == 1 else 'Idle'}",
-                                className="controller-meta-line",
-                            ),
-                        ]
-                    ),
-                    className="controller-panel h-100",
-                ),
-                md=4,
-            ),
-            dbc.Col(
-                dbc.Card(
-                    dbc.CardBody(
-                        [
-                            html.Div("Right Control", className="controller-panel-title"),
-                            joystick_widget("Right Stick", int(controller["RjoyX"]), int(controller["RjoyY"])),
-                            trigger_bar("Right Trigger", int(controller["RT"])),
-                            html.Div(
-                                f"RB: {'Pressed' if controller['RB'] == 1 else 'Idle'}",
-                                className="controller-meta-line",
-                            ),
-                            html.Div(
-                                f"RS: {'Pressed' if controller['RS'] == 1 else 'Idle'}",
-                                className="controller-meta-line",
-                            ),
-                        ]
-                    ),
-                    className="controller-panel h-100",
-                ),
-                md=4,
-            ),
-            dbc.Col(
-                dbc.Card(
-                    dbc.CardBody(
-                        [
-                            html.Div("Xbox Mapping", className="controller-panel-title"),
-                            html.Div(
-                                [
-                                    html.Div(
-                                        "Y",
-                                        className=f"face-button face-button-y{' active' if controller['N'] == 1 else ''}",
-                                    ),
-                                    html.Div(
-                                        "X",
-                                        className=f"face-button face-button-x{' active' if controller['W'] == 1 else ''}",
-                                    ),
-                                    html.Div(
-                                        "B",
-                                        className=f"face-button face-button-b{' active' if controller['E'] == 1 else ''}",
-                                    ),
-                                    html.Div(
-                                        "A",
-                                        className=f"face-button face-button-a{' active' if controller['S'] == 1 else ''}",
-                                    ),
-                                ],
-                                className="face-button-grid",
-                            ),
-                            html.Div(
-                                [
-                                    html.Div(
-                                        "U",
-                                        className=f"dpad-cell dpad-up{' active' if controller['dY'] < 0 else ''}",
-                                    ),
-                                    html.Div(
-                                        "L",
-                                        className=f"dpad-cell dpad-left{' active' if controller['dX'] < 0 else ''}",
-                                    ),
-                                    html.Div(
-                                        "R",
-                                        className=f"dpad-cell dpad-right{' active' if controller['dX'] > 0 else ''}",
-                                    ),
-                                    html.Div(
-                                        "D",
-                                        className=f"dpad-cell dpad-down{' active' if controller['dY'] > 0 else ''}",
-                                    ),
-                                ],
-                                className="dpad-grid",
-                            ),
-                            html.Div(
-                                [
-                                    html.Div(f"DPad: x={controller['dX']} y={controller['dY']}", className="controller-meta-line"),
-                                    html.Div(f"Actuator: {actuator_state}", className="controller-meta-line"),
-                                    html.Div(f"Vibration Input: {vibration_input}", className="controller-meta-line"),
-                                    html.Div(f"Rover: {rover_state_label}", className="controller-meta-line"),
-                                    html.Div(f"Mode: {mode}", className="controller-meta-line"),
-                                    html.Div(f"State Combo: {combo_text}", className="controller-meta-line"),
-                                ],
-                                className="subsystem-stack",
-                            ),
-                        ]
-                    ),
-                    className="controller-panel h-100",
-                ),
-                md=4,
-            ),
-        ],
-        className="g-3",
-    )
-
-
-def build_debug_controller_view(controller, combo_state, requested_mode, combo_text, rover_state, rover_request):
-    return dbc.Row(
-        [
-            dbc.Col(
-                [
-                    joystick_widget("Left Stick", int(controller["LjoyX"]), int(controller["LjoyY"])),
-                    trigger_bar("Left Trigger", int(controller["LT"])),
-                ],
-                md=4,
-            ),
-            dbc.Col(
-                [
-                    joystick_widget("Right Stick", int(controller["RjoyX"]), int(controller["RjoyY"])),
-                    trigger_bar("Right Trigger", int(controller["RT"])),
-                ],
-                md=4,
-            ),
-            dbc.Col(
-                dbc.Card(
-                    dbc.CardBody(
-                        [
-                            html.Div("Buttons", style={"fontWeight": "bold", "marginBottom": "10px"}),
-                            button_light("N", controller["N"] == 1),
-                            button_light("E", controller["E"] == 1),
-                            button_light("S", controller["S"] == 1),
-                            button_light("W", controller["W"] == 1),
-                            html.Hr(),
-                            button_light("LB", controller["LB"] == 1),
-                            button_light("RB", controller["RB"] == 1),
-                            button_light("LS", controller["LS"] == 1),
-                            button_light("RS", controller["RS"] == 1),
-                            html.Hr(),
-                            button_light("SELECT", controller["SELECT"] == 1),
-                            button_light("START", controller["START"] == 1),
-                            html.Hr(),
-                            html.Div(
-                                f"DPad: x={controller['dX']} y={controller['dY']}",
-                                style={"fontFamily": "monospace"},
-                            ),
-                            html.Div(
-                                f"Source: {controller.get('source', 'pc')}",
-                                style={"fontFamily": "monospace", "marginTop": "8px"},
-                            ),
-                            html.Div(
-                                f"Timestamp: {controller.get('ts', 0)}",
-                                style={"fontFamily": "monospace"},
-                            ),
-                            html.Hr(),
-                            html.Div("State Switch", style={"fontWeight": "bold", "marginBottom": "10px"}),
-                            html.Div(
-                                f"Combo status: {combo_state}",
-                                style={"fontFamily": "monospace"},
-                            ),
-                            html.Div(
-                                f"Requested mode: {requested_mode or 'none'}",
-                                style={"fontFamily": "monospace"},
-                            ),
-                            html.Div(
-                                combo_text,
-                                style={"fontFamily": "monospace"},
-                            ),
-                            html.Div(
-                                f"Pending request: "
-                                f"{rover_request.get('state', 'none') if is_fresh_state_info(rover_request) else 'none'}",
-                                style={"fontFamily": "monospace", "marginTop": "8px"},
-                            ),
-                            html.Div(
-                                (
-                                    f"Pending seq/source: "
-                                    f"{rover_request.get('seq', '-')}/{rover_request.get('source', '-')}"
-                                    if is_fresh_state_info(rover_request)
-                                    else "Pending seq/source: -"
-                                ),
-                                style={"fontFamily": "monospace"},
-                            ),
-                            html.Div(
-                                (
-                                    f"Rover state: {rover_state.get('state', 'unknown')}"
-                                    if rover_state and rover_state.get("valid")
-                                    else "Rover state: unknown"
-                                ),
-                                style={"fontFamily": "monospace", "marginTop": "8px"},
-                            ),
-                            html.Div(
-                                (
-                                    f"Rover state age: {state_age_text(rover_state.get('timestamp'))}"
-                                    if rover_state and rover_state.get("valid")
-                                    else "Rover state age: unknown"
-                                ),
-                                style={"fontFamily": "monospace"},
-                            ),
-                        ]
-                    )
-                ),
-                md=4,
-            ),
-        ]
-    )
-
-
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.CYBORG])
 app.title = "FIU Lunabotics Rover Control"
 app.layout = dbc.Container(
@@ -1355,6 +1566,107 @@ app.layout = dbc.Container(
 )
 
 
+@app.server.get("/api/webrtc/<path:source>/offer")
+def get_webrtc_offer(source):
+    with state_lock:
+        signal = dict(camera_signals.get(source, {}))
+        status = dict(status_sources.get(source, {}))
+
+    if signal.get("signal_kind") != "offer" or not signal.get("sdp"):
+        return jsonify(
+            {
+                "available": False,
+                "source": source,
+                "message": status.get("message", "Waiting for WebRTC offer from Jetson."),
+                "webrtc_state": status.get("webrtc_state", ""),
+            }
+        )
+
+    return jsonify(
+        {
+            "available": True,
+            "source": source,
+            "signal_id": signal.get("signal_id", ""),
+            "sdp_type": signal.get("sdp_type", "offer"),
+            "sdp": signal.get("sdp", ""),
+            "signal_host": signal.get("signal_host", ""),
+            "signal_port": signal.get("signal_port", 0),
+            "webrtc_state": status.get("webrtc_state", ""),
+            "message": status.get("message", ""),
+        }
+    )
+
+
+@app.server.post("/api/webrtc/<path:source>/restart")
+def restart_webrtc_offer(source):
+    with state_lock:
+        target = signal_target_for_source(source)
+
+    if target is None:
+        return jsonify({"ok": False, "error": f"No signaling target is known for {source}."}), 404
+
+    try:
+        send_framed_packet(
+            target[0],
+            target[1],
+            {
+                "type": "camera_signal",
+                "source": "dashboard",
+                "target_source": source,
+                "signal_kind": "request_offer",
+                "ts": int(time.time() * 1000),
+            },
+        )
+    except OSError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 502
+
+    return jsonify({"ok": True, "source": source})
+
+
+@app.server.post("/api/webrtc/<path:source>/answer")
+def post_webrtc_answer(source):
+    payload = request.get_json(silent=True) or {}
+    if not payload.get("sdp"):
+        return jsonify({"ok": False, "error": "Missing SDP answer payload."}), 400
+
+    with state_lock:
+        target = signal_target_for_source(source)
+
+    if target is None:
+        return jsonify({"ok": False, "error": f"No signaling target is known for {source}."}), 404
+
+    try:
+        send_framed_packet(
+            target[0],
+            target[1],
+            {
+                "type": "camera_signal",
+                "source": "dashboard",
+                "target_source": source,
+                "signal_kind": "answer",
+                "signal_id": payload.get("signal_id", ""),
+                "sdp_type": payload.get("sdp_type", "answer"),
+                "sdp": payload["sdp"],
+                "ts": int(time.time() * 1000),
+            },
+        )
+    except OSError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 502
+
+    return jsonify({"ok": True, "source": source})
+
+
+
+@app.callback(
+    Output("controller-view-toggle", "style"),
+    Input("tabs", "active_tab"),
+)
+def toggle_controller_view_buttons(active_tab):
+    if active_tab == "controller":
+        return {}
+    return {"display": "none"}
+
+
 @app.callback(
     Output("controller-view", "data"),
     Output("btn-main-view", "color"),
@@ -1385,16 +1697,6 @@ def set_controller_view(_, __, current_view):
 
 
 @app.callback(
-    Output("controller-view-toggle", "style"),
-    Input("tabs", "active_tab"),
-)
-def toggle_controller_view_buttons(active_tab):
-    if active_tab == "controller":
-        return {}
-    return {"display": "none"}
-
-
-@app.callback(
     Output("status-bar", "children"),
     Output("mode-label", "children"),
     Output("controller-summary", "children"),
@@ -1412,6 +1714,7 @@ def update_ui(_, active_tab, controller_view):
         combo_info = dict(latest_state_combo)
         traffic = dict(metrics)
         status_source_count = len(status_sources)
+        all_statuses = dict(status_sources)
 
         statuses = {}
         status_log = []
@@ -1478,11 +1781,30 @@ def update_ui(_, active_tab, controller_view):
         html.Div(f"forwarded: {traffic['packets_forwarded']}"),
         html.Div(f"controller packets: {traffic['controller_packets']}"),
         html.Div(f"status packets: {traffic['status_packets']}"),
+        html.Div(f"camera signals: {traffic['camera_signal_packets']}"),
         html.Div(f"crc failures: {traffic['crc_failures']}"),
         html.Div(f"forward failures: {traffic['forward_failures']}"),
     ]
 
     if active_tab == "controller":
+        camera_panels = [
+            dbc.Col(
+                camera_view_card(
+                    CONFIG.camera_one_label,
+                    CONFIG.camera_one_source,
+                    all_statuses,
+                ),
+                md=6,
+            ),
+            dbc.Col(
+                camera_view_card(
+                    CONFIG.camera_two_label,
+                    CONFIG.camera_two_source,
+                    all_statuses,
+                ),
+                md=6,
+            ),
+        ]
         if controller_view == "debug":
             content = build_debug_controller_view(
                 controller,
@@ -1493,7 +1815,13 @@ def update_ui(_, active_tab, controller_view):
                 rover_request,
             )
         else:
-            content = build_main_controller_view(controller, combo_text, mode, rover_state)
+            content = build_main_controller_view(
+                controller,
+                combo_text,
+                mode,
+                rover_state,
+                camera_panels,
+            )
     elif active_tab == "status":
         if statuses:
             rows = []
@@ -1504,6 +1832,7 @@ def update_ui(_, active_tab, controller_view):
                         [
                             html.Td(source),
                             html.Td(entry["message"]),
+                            html.Td(entry.get("details", "")),
                             html.Td(entry["peer"]),
                             html.Td(age_text(age)),
                             html.Td(entry["ts"]),
@@ -1511,13 +1840,16 @@ def update_ui(_, active_tab, controller_view):
                     )
                 )
         else:
-            rows = [html.Tr([html.Td("No status packets received yet", colSpan=5)])]
+            rows = [html.Tr([html.Td("No status packets received yet", colSpan=6)])]
 
         recent = []
         for entry in status_log[:12]:
+            detail_suffix = ""
+            if entry.get("details"):
+                detail_suffix = f" | {entry['details']}"
             recent.append(
                 html.Div(
-                    f"{entry['source']} | {entry['message']} | peer={entry['peer']} | ts={entry['ts']}",
+                    f"{entry['source']} | {entry['message']}{detail_suffix} | peer={entry['peer']} | ts={entry['ts']}",
                     style={"fontFamily": "monospace", "fontSize": "12px", "marginBottom": "6px"},
                 )
             )
@@ -1536,6 +1868,7 @@ def update_ui(_, active_tab, controller_view):
                                                 [
                                                     html.Th("Source"),
                                                     html.Th("Message"),
+                                                    html.Th("Details"),
                                                     html.Th("Peer"),
                                                     html.Th("Age"),
                                                     html.Th("ts"),
