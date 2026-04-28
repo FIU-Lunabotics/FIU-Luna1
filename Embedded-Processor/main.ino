@@ -14,8 +14,9 @@ constexpr size_t BUFFER_SIZE = 64;
 
 constexpr byte DXP_POS_MASK = 1 << 2;
 constexpr byte DXP_NEG_MASK = 1 << 3;
-constexpr byte DYP_NEG_MASK = 1 << 4; //Line 16 - bit 4 = D-Pad UP
-constexpr byte DYP_POS_MASK = 1 << 5; //Line 16 - bit 5 = D-Pad DOWN
+constexpr byte DYP_NEG_MASK = 1 << 4;
+constexpr byte DYP_POS_MASK = 1 << 5;
+constexpr bool DPAD_Y_NEG_IS_UP = false;  // Observed controller reports DOWN as -1 and UP as +1.
 
 struct ControlPacket {
   byte start_byte = 0;
@@ -124,15 +125,17 @@ struct ControlPacket {
   }
 
   bool dPadUp() const {
-    return (secondary_buttons & DYP_NEG_MASK) != 0;
+    byte mask = DPAD_Y_NEG_IS_UP ? DYP_NEG_MASK : DYP_POS_MASK;
+    return (secondary_buttons & mask) != 0;
   }
 
   bool dPadDown() const {
-    return (secondary_buttons & DYP_POS_MASK) != 0;
+    byte mask = DPAD_Y_NEG_IS_UP ? DYP_POS_MASK : DYP_NEG_MASK;
+    return (secondary_buttons & mask) != 0;
   }
 
   bool getYButton() const {
-    return (primary_buttons & (1 << 7)) != 0;
+    return (primary_buttons & (1 << 0)) != 0;  // Check bit 0 for Y button
   }
 };
 
@@ -143,18 +146,18 @@ bool lastYButtonState = false;
 
 int escPin1 = 9;
 int escPin2 = 10;
-int linAcc1 = 11;  //ACTUATOR Extend
-int linAcc2 = 12;  //ACTUATOR Retract
+int liftPwmPin = 11;  // Lift actuator MD20A PWM input
+int tiltPwmPin = 12;  // Tilt actuator MD20A PWM input
 int vibrationPin = 3;  // PWM pin for vibration motor
-// int button1 = 2; removed these lines to establish 
+// int button1 = 2; removed these lines to establish
 // int button2 = 4;  (was 3, now used for vibration)
 // int button3 = 5;  (was 4)
 // int button4 = 8;  (was 5)
-int dir1 = 6;
-int dir2 = 7;
+int liftDirPin = 6;  // Lift actuator MD20A DIR input
+int tiltDirPin = 7;  // Tilt actuator MD20A DIR input
 // int potPin = A0;
 
-constexpr bool BIDIRECTIONAL_ESC = false;
+constexpr bool BIDIRECTIONAL_ESC = true;
 constexpr byte joystickCenter = 128;
 constexpr byte joystickDeadband = 8;
 constexpr bool DEBUG_SERIAL = false;
@@ -164,6 +167,29 @@ int escPulseMin = 1000;
 int escPulseNeutral = 1500;
 int escPulseMax = 2000;
 unsigned long lastDebugPrintMs = 0;
+
+constexpr int ACTUATOR_STOP = 0;
+constexpr int ACTUATOR_FORWARD = 1;
+constexpr int ACTUATOR_REVERSE = -1;
+
+// Note for how to use the MD20A PWM/DIR actuator (THIS IS FOR PROG TEAM):
+//   PWM LOW  = brake/stop, DIR ignored
+//   PWM HIGH + DIR LOW  = one motor direction
+//   PWM HIGH + DIR HIGH = opposite motor direction
+constexpr int LIFT_UP_DIRECTION = ACTUATOR_FORWARD;
+constexpr int LIFT_DOWN_DIRECTION = ACTUATOR_REVERSE;
+// Tilt direction was inverted in software so D-pad Up/Down matches physical tilt motion.
+constexpr int TILT_UP_DIRECTION = ACTUATOR_REVERSE;
+constexpr int TILT_DOWN_DIRECTION = ACTUATOR_FORWARD;
+
+// D-pad actuator commands (THIS IS FOR PROG TEAM):
+//   N/Up    -> lift box up
+//   S/Down  -> bring box down
+//   E/Right -> tilt actuator up
+//   W/Left  -> tilt actuator down
+constexpr uint8_t MD20A_FORWARD_DIR_LEVEL = LOW;
+constexpr uint8_t MD20A_REVERSE_DIR_LEVEL = HIGH;
+constexpr uint8_t MD20A_IDLE_DIR_LEVEL = LOW;
 
 int escStopPulse() {
   return BIDIRECTIONAL_ESC ? escPulseNeutral : escPulseMin;
@@ -186,16 +212,35 @@ int axisToPulse(byte axisValue) {
   return map(deflection, joystickDeadband, maxDeflection, escPulseMin, escPulseMax);
 }
 
+void driveActuator(int pwmPin, int dirPin, int direction) {
+  if (direction == ACTUATOR_STOP) {
+    digitalWrite(dirPin, MD20A_IDLE_DIR_LEVEL);
+    digitalWrite(pwmPin, LOW);
+    return;
+  }
+
+  uint8_t dirLevel = direction == ACTUATOR_REVERSE ? MD20A_REVERSE_DIR_LEVEL : MD20A_FORWARD_DIR_LEVEL;
+  digitalWrite(dirPin, dirLevel);
+  digitalWrite(pwmPin, HIGH);
+}
+
+int directionFromButtons(bool forwardPressed, bool reversePressed, int forwardDirection, int reverseDirection) {
+  if (forwardPressed == reversePressed) {
+    return ACTUATOR_STOP;
+  }
+  return forwardPressed ? forwardDirection : reverseDirection;
+}
+
 void setup() {
   // pinMode(button1,INPUT);
   // pinMode(button2,INPUT);
   // pinMode(button3,INPUT);
   // pinMode(button4,INPUT);
   Serial.begin(9600);
-  pinMode(linAcc1, OUTPUT);
-  pinMode(linAcc2, OUTPUT);
-  pinMode(dir1, OUTPUT);
-  pinMode(dir2, OUTPUT);
+  pinMode(liftPwmPin, OUTPUT);
+  pinMode(tiltPwmPin, OUTPUT);
+  pinMode(liftDirPin, OUTPUT);
+  pinMode(tiltDirPin, OUTPUT);
   pinMode(vibrationPin, OUTPUT);
 
   esc1.attach(escPin1, escPulseMin, escPulseMax);
@@ -220,22 +265,35 @@ void loop() {
     esc1.writeMicroseconds(leftPulse);
     esc2.writeMicroseconds(rightPulse);
 
-    // Keep auxiliary outputs simple and deterministic until their final mapping
-    // is locked in with the embedded pinout and actuator expectations.
-    digitalWrite(linAcc1, controllerPacket.dPadUp() ? HIGH : LOW);
-    digitalWrite(linAcc2, controllerPacket.dPadDown() ? HIGH : LOW);
-    digitalWrite(dir1, controllerPacket.dPadRight() ? HIGH : LOW);
-    digitalWrite(dir2, controllerPacket.dPadLeft() ? HIGH : LOW);
+    // Controls were swapped so Left/Right now drive the lift actuator.
+    int liftDirection = directionFromButtons(
+      controllerPacket.dPadRight(),
+      controllerPacket.dPadLeft(),
+      LIFT_UP_DIRECTION,
+      LIFT_DOWN_DIRECTION
+    );
+    // Controls were swapped so Up/Down now drive the tilt actuator.
+    int tiltDirection = directionFromButtons(
+      controllerPacket.dPadUp(),
+      controllerPacket.dPadDown(),
+      TILT_UP_DIRECTION,
+      TILT_DOWN_DIRECTION
+    );
 
-    //Adding toggle logic for vibration motor on Y button press. 
+    driveActuator(liftPwmPin, liftDirPin, liftDirection);
+    driveActuator(tiltPwmPin, tiltDirPin, tiltDirection);
+
+    //Adding toggle logic for vibration motor on Y button press.
     bool currentYButton = controllerPacket.getYButton();
     if (currentYButton && !lastYButtonState) {
       vibrationOn = !vibrationOn;
       if (vibrationOn) {
-        analogWrite(vibrationPin, 255);
+        // Changed the value into a moderate intensity for the vibration motor. Adjust as needed.
+        analogWrite(vibrationPin, 62);
       } else {
         analogWrite(vibrationPin, 0);
       }
+      Serial.println(vibrationOn ? 1 : 0);
     }
     lastYButtonState = currentYButton;
 

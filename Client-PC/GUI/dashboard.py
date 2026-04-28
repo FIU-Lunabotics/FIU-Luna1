@@ -983,7 +983,9 @@ def build_main_controller_view(controller, combo_text, mode, rover_state, camera
         else "Idle"
     )
     vibration_input = "Y pressed" if controller["N"] == 1 else "Idle"
-    rover_state_label = rover_state.get("state", "unknown") if rover_state and rover_state.get("valid") else "unknown"
+    rover_state_label = mode if mode and mode != "UNKNOWN" else (
+        rover_state.get("state", "unknown") if rover_state and rover_state.get("valid") else "unknown"
+    )
 
     return html.Div(
         [
