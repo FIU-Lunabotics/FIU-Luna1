@@ -7,10 +7,11 @@ This guide shows the most common remote workflow for this repo:
 - The operator laptop runs the dashboard in `Client-PC/GUI`
 - The operator laptop also runs `Client-PC/Network-Stack`
 - An optional Jetson client can also report through the dashboard
+- An optional Jetson camera stream can also publish WebRTC through the dashboard
 
 ## How Many Terminals You Need
 
-For the full dashboard + teleop setup, plan on **4 terminals plus 1 browser tab**:
+For the dashboard + teleop setup without Jetson camera, plan on **4 terminals plus 1 browser tab**:
 
 1. `Terminal 1` on the operator laptop:
    SSH into the Raspberry Pi and run the rover state machine from `Server-Pi/Rover`
@@ -26,7 +27,25 @@ For the full dashboard + teleop setup, plan on **4 terminals plus 1 browser tab*
 Optional additions:
 
 - Add **1 more terminal on the Jetson** if you also want to run `Client-Jetson/Network-Stack`
+- Add **1 more terminal on the Jetson** if you also want to run the Jetson WebRTC camera stream
 - Add **1 more terminal on the operator laptop** if you want a dedicated log-view window
+
+For the full setup with Jetson heartbeat and Jetson camera, plan on **6 terminals plus 1 browser tab**:
+
+1. `Terminal 1` on the operator laptop:
+   SSH into the Raspberry Pi and run the rover state machine from `Server-Pi/Rover`
+2. `Terminal 2` on the operator laptop:
+   Open a second SSH session into the Raspberry Pi and run `Server-Pi/Network-Stack`
+3. `Terminal 3` on the operator laptop:
+   Run the dashboard from `Client-PC/GUI`
+4. `Terminal 4` on the operator laptop:
+   Run the operator client from `Client-PC/Network-Stack`
+5. `Terminal 5` on the Jetson:
+   Run the Jetson heartbeat client from `Client-Jetson/Network-Stack`
+6. `Terminal 6` on the Jetson:
+   Run the Jetson WebRTC camera stream from `Client-Jetson/Neural-Network/Gazebo/controllers/sensors/camera_stream.py`
+7. Browser tab on the operator laptop:
+   Open the dashboard UI at `http://127.0.0.1:8050`
 
 If you use `tmux` on the Pi, you can keep the state machine and server running in managed sessions instead of leaving both SSH terminals attached the whole time.
 
@@ -38,6 +57,8 @@ Client-PC ------------------\
 Client-Jetson -------------/
 
 Browser UI ------------------------------------------------------------> Dashboard UI on operator PC (:8050)
+Jetson camera status/WebRTC offer ------------------------------------> Dashboard proxy on operator PC (:8090)
+Dashboard/browser WebRTC signaling -----------------------------------> Jetson camera signaling (:8081)
 ```
 
 ## Startup Order
@@ -49,6 +70,8 @@ Start the pieces in this order:
 3. Start the dashboard on the operator laptop
 4. Start the PC client on the operator laptop
 5. Open the dashboard in the browser
+6. Optional: start the Jetson heartbeat client
+7. Optional: start the Jetson WebRTC camera stream
 
 ## Before You Start
 
@@ -218,10 +241,39 @@ Use the operator laptop's actual LAN address for `<OPERATOR_PC_IP>` so the Jetso
 
 This usually means:
 
-- `Terminal 4` on the Jetson, or
+- `Terminal 5` on the Jetson in the full Jetson setup, or
 - a separate SSH session into the Jetson from another machine
 
-## 9. What Success Looks Like
+## 9. Optional: Start the Jetson WebRTC Camera Through the Dashboard
+
+If you also want the Jetson camera to appear in the dashboard, start the camera
+script on the Jetson and point `--report-to` at the operator laptop's dashboard
+listener:
+
+```bash
+cd ~/Lunabotics/FIU-Luna1
+python3 Client-Jetson/Neural-Network/Gazebo/controllers/sensors/camera_stream.py \
+  --source auto \
+  --headless \
+  --serve-webrtc \
+  --signal-bind-host 0.0.0.0 \
+  --signal-port 8081 \
+  --signal-public-host <JETSON_IP> \
+  --report-to <OPERATOR_PC_IP>:8090 \
+  --report-source jetson-camera-1
+```
+
+Use:
+
+- `<JETSON_IP>` as the Jetson's LAN address from `hostname -I`
+- `<OPERATOR_PC_IP>` as the operator laptop's LAN address from `hostname -I`
+- `jetson-camera-1` to match the dashboard's default first camera panel
+
+The camera script sends camera status and WebRTC offers to the dashboard on
+port `8090`. The dashboard/browser sends WebRTC signaling answers back to the
+Jetson on port `8081`. The video itself flows over WebRTC media transport.
+
+## 10. What Success Looks Like
 
 - The Pi state-machine terminal is running and updating `/tmp/rover_state`
 - The Pi terminal shows incoming TCP connections
@@ -229,6 +281,9 @@ This usually means:
 - The dashboard packet listener is active on port `8090`
 - Controller packets appear in the dashboard
 - Forwarded packet status shows traffic moving to the Pi
+- Jetson status packets appear in the dashboard if the Jetson heartbeat client is running
+- Camera status shows `first_frame_ok`, `webrtc_offer_ready`, or `preview_running` if the Jetson camera script is running
+- The dashboard camera panel negotiates WebRTC and shows the Jetson camera feed
 
 ## One-Line Pi Startup Over SSH
 
