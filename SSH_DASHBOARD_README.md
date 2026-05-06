@@ -283,6 +283,7 @@ Jetson on port `8081`. The video itself flows over WebRTC media transport.
 - Forwarded packet status shows traffic moving to the Pi
 - Jetson status packets appear in the dashboard if the Jetson heartbeat client is running
 - Camera status shows `first_frame_ok`, `webrtc_offer_ready`, or `preview_running` if the Jetson camera script is running
+- Camera status details show `branch=tee`, increasing `gui` and `cv` branch frame counts, and `branch_health=both_active`
 - The dashboard camera panel negotiates WebRTC and shows the Jetson camera feed
 
 ## One-Line Pi Startup Over SSH

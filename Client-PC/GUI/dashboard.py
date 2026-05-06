@@ -672,6 +672,18 @@ def update_state_from_packet(peer, total_len, packet, forwarded):
                         details.append(f"signal={obj.get('signal_host')}:{obj.get('signal_port')}")
                     if obj.get("webrtc_state"):
                         details.append(f"webrtc={obj.get('webrtc_state')}")
+                    if obj.get("gstreamer_branch_mode"):
+                        details.append(f"branch={obj.get('gstreamer_branch_mode')}")
+                    if (
+                        obj.get("gui_branch_frames") is not None
+                        and obj.get("cv_branch_frames") is not None
+                    ):
+                        details.append(
+                            "branch_frames="
+                            f"gui:{obj.get('gui_branch_frames')}/cv:{obj.get('cv_branch_frames')}"
+                        )
+                    if obj.get("branch_health"):
+                        details.append(f"branch_health={obj.get('branch_health')}")
                     status_sources[source] = {
                         "message": obj.get("message", ""),
                         "ts": obj.get("ts", 0),

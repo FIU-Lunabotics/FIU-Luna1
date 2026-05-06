@@ -42,6 +42,17 @@ except ImportError:
     np = None
 
 try:
+    import gi
+
+    gi.require_version("Gst", "1.0")
+    gi.require_version("GstApp", "1.0")
+    gi.require_version("GstVideo", "1.0")
+    from gi.repository import Gst, GstVideo
+except (ImportError, ValueError):
+    Gst = None
+    GstVideo = None
+
+try:
     from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
     from aiortc.exceptions import InvalidStateError
 except ImportError:
@@ -229,6 +240,192 @@ class LatestFrameStore:
             }
 
 
+class BranchedGStreamerCapture:
+    def __init__(self, args, gui_frame_store=None):
+        if Gst is None:
+            raise RuntimeError(
+                "Jetson GStreamer branch mode requires PyGObject/Gst. "
+                "Install python3-gi and GStreamer Python bindings on the Jetson."
+            )
+        if np is None:
+            raise RuntimeError("Jetson GStreamer branch mode requires numpy.")
+
+        Gst.init(None)
+        self.args = args
+        self.gui_frame_store = gui_frame_store or LatestFrameStore()
+        self.cv_frame_store = LatestFrameStore()
+        self.lock = threading.Lock()
+        self.read_frame_count = 0
+        self.opened = False
+        self.pipeline = None
+        self.bus = None
+        self.last_error = ""
+        self.branch_counts = {"gui": 0, "cv": 0}
+        self.branch_last_update = {"gui": 0.0, "cv": 0.0}
+        self.branch_dimensions = {
+            "gui": (0, 0),
+            "cv": (0, 0),
+        }
+
+        self.pipeline = Gst.parse_launch(build_jetson_branched_pipeline(args))
+        self.bus = self.pipeline.get_bus()
+        self._connect_sink("gui_sink", self._on_gui_sample)
+        self._connect_sink("cv_sink", self._on_cv_sample)
+
+        result = self.pipeline.set_state(Gst.State.PLAYING)
+        if result == Gst.StateChangeReturn.FAILURE:
+            self.last_error = "failed to set GStreamer pipeline to PLAYING"
+            self.release()
+            raise RuntimeError(self.last_error)
+
+        self.opened = True
+
+    def _connect_sink(self, sink_name, callback):
+        sink = self.pipeline.get_by_name(sink_name)
+        if sink is None:
+            raise RuntimeError(f"GStreamer pipeline is missing appsink {sink_name!r}.")
+        sink.set_property("emit-signals", True)
+        sink.connect("new-sample", callback)
+
+    def _on_gui_sample(self, sink):
+        return self._consume_sample(sink, "gui", self.gui_frame_store)
+
+    def _on_cv_sample(self, sink):
+        return self._consume_sample(sink, "cv", self.cv_frame_store)
+
+    def _consume_sample(self, sink, branch_name, frame_store):
+        sample = sink.emit("pull-sample")
+        if sample is None:
+            return Gst.FlowReturn.ERROR
+
+        frame = self._sample_to_frame(sample)
+        if frame is None:
+            return Gst.FlowReturn.ERROR
+
+        frame_store.update(frame)
+        height, width = frame.shape[:2]
+        with self.lock:
+            self.branch_counts[branch_name] += 1
+            self.branch_last_update[branch_name] = time.time()
+            self.branch_dimensions[branch_name] = (width, height)
+        return Gst.FlowReturn.OK
+
+    def _sample_to_frame(self, sample):
+        caps = sample.get_caps()
+        if caps is None or caps.get_size() == 0:
+            return None
+
+        structure = caps.get_structure(0)
+        width = int(structure.get_value("width"))
+        height = int(structure.get_value("height"))
+        buffer = sample.get_buffer()
+        if buffer is None:
+            return None
+
+        ok, map_info = buffer.map(Gst.MapFlags.READ)
+        if not ok:
+            return None
+        try:
+            row_width = width * 3
+            stride = row_width
+            if GstVideo is not None:
+                video_info = GstVideo.VideoInfo.new_from_caps(caps)
+                if video_info is not None:
+                    stride = abs(video_info.stride[0]) or row_width
+
+            expected_size = stride * height
+            data = map_info.data
+            if len(data) < expected_size:
+                return None
+            if stride == row_width:
+                frame = np.frombuffer(data, dtype=np.uint8, count=row_width * height)
+                return frame.reshape((height, width, 3)).copy()
+
+            rows = np.frombuffer(data, dtype=np.uint8, count=expected_size)
+            rows = rows.reshape((height, stride))
+            return rows[:, :row_width].reshape((height, width, 3)).copy()
+        finally:
+            buffer.unmap(map_info)
+
+    def isOpened(self):
+        if not self.opened:
+            return False
+        return self._check_bus()
+
+    def read(self):
+        if not self.isOpened():
+            return False, None
+
+        snapshot = self.gui_frame_store.wait_for_newer(self.read_frame_count, timeout=2.0)
+        frame = snapshot["frame"]
+        if frame is None:
+            self._check_bus()
+            return False, None
+
+        self.read_frame_count = snapshot["frame_count"]
+        return True, frame
+
+    def release(self):
+        self.opened = False
+        if self.pipeline is not None:
+            self.pipeline.set_state(Gst.State.NULL)
+        self.pipeline = None
+        self.bus = None
+
+    def _check_bus(self):
+        if self.bus is None:
+            return self.opened
+
+        while True:
+            message = self.bus.pop_filtered(
+                Gst.MessageType.ERROR | Gst.MessageType.EOS | Gst.MessageType.WARNING
+            )
+            if message is None:
+                break
+            if message.type == Gst.MessageType.ERROR:
+                error, debug = message.parse_error()
+                self.last_error = f"{error}: {debug or ''}".strip()
+                print(f"GStreamer branch pipeline error: {self.last_error}")
+                self.opened = False
+                return False
+            if message.type == Gst.MessageType.EOS:
+                self.last_error = "GStreamer branch pipeline reached EOS"
+                print(self.last_error)
+                self.opened = False
+                return False
+            if message.type == Gst.MessageType.WARNING:
+                warning, debug = message.parse_warning()
+                self.last_error = f"{warning}: {debug or ''}".strip()
+                print(f"GStreamer branch pipeline warning: {self.last_error}")
+        return self.opened
+
+    def branch_status_fields(self):
+        now = time.time()
+        with self.lock:
+            gui_width, gui_height = self.branch_dimensions["gui"]
+            cv_width, cv_height = self.branch_dimensions["cv"]
+            gui_last = self.branch_last_update["gui"]
+            cv_last = self.branch_last_update["cv"]
+            return {
+                "gstreamer_branch_mode": "tee",
+                "gui_branch_frames": self.branch_counts["gui"],
+                "cv_branch_frames": self.branch_counts["cv"],
+                "gui_branch_active": gui_last > 0,
+                "cv_branch_active": cv_last > 0,
+                "gui_branch_age": round(now - gui_last, 3) if gui_last else None,
+                "cv_branch_age": round(now - cv_last, 3) if cv_last else None,
+                "gui_branch_width": gui_width,
+                "gui_branch_height": gui_height,
+                "cv_branch_width": cv_width,
+                "cv_branch_height": cv_height,
+                "branch_health": (
+                    "both_active"
+                    if self.branch_counts["gui"] > 0 and self.branch_counts["cv"] > 0
+                    else "waiting_for_frames"
+                ),
+            }
+
+
 class LatestFrameTrack(VideoStreamTrack):
     def __init__(self, frame_store, fps):
         super().__init__()
@@ -374,19 +571,19 @@ class CameraWebRTCManager:
             camera_state="webrtc_offer_ready",
             **self.signal_fields(),
         )
-        self.reporter.send_packet(
-            {
-                "type": "camera_signal",
-                "source": self.report_source,
-                "component": "camera",
-                "signal_kind": "offer",
-                "signal_id": self.signal_id,
-                "sdp_type": local_description.type,
-                "sdp": local_description.sdp,
-                "ts": int(time.time() * 1000),
-                **self.signal_fields(),
-            }
-        )
+        offer_payload = {
+            "type": "camera_signal",
+            "source": self.report_source,
+            "component": "camera",
+            "signal_kind": "offer",
+            "signal_id": self.signal_id,
+            "sdp_type": local_description.type,
+            "sdp": local_description.sdp,
+            "ts": int(time.time() * 1000),
+            **self.signal_fields(),
+        }
+        self.reporter.send_packet(offer_payload)
+        return offer_payload
 
     async def _wait_for_ice_complete(self, pc):
         if pc.iceGatheringState == "complete":
@@ -416,10 +613,16 @@ class CameraWebRTCManager:
             obj = json.loads(payload.decode("utf-8"))
             if not isinstance(obj, dict):
                 return
-
             signal_kind = obj.get("signal_kind")
             if signal_kind == "request_offer":
-                await self._publish_offer()
+                offer_payload = await self._publish_offer()
+                payload_bytes = json.dumps(offer_payload, separators=(",", ":")).encode("utf-8")
+                crc = zlib.crc32(payload_bytes) & 0xFFFFFFFF
+                framed = payload_bytes + struct.pack(">I", crc)
+                header = struct.pack(">I", len(framed))
+                writer.write(header)
+                writer.write(framed)
+                await writer.drain()
             elif signal_kind == "answer":
                 if not obj.get("sdp"):
                     return
@@ -617,7 +820,47 @@ def build_jetson_pipeline(sensor_id, width, height, fps, flip_method):
     )
 
 
-def open_jetson_camera(args):
+def build_jetson_branched_pipeline(args):
+    return (
+        "nvarguscamerasrc sensor-id={sensor_id} ! "
+        "video/x-raw(memory:NVMM), width=(int){width}, height=(int){height}, "
+        "format=(string)NV12, framerate=(fraction){fps}/1 ! "
+        "nvvidconv flip-method={flip_method} ! "
+        "video/x-raw, width=(int){width}, height=(int){height}, format=(string)BGRx ! "
+        "videoconvert ! "
+        "video/x-raw, format=(string)BGR ! "
+        "tee name=camera_branch "
+        "camera_branch. ! queue name=gui_queue leaky=downstream max-size-buffers=2 "
+        "max-size-bytes=0 max-size-time=0 ! "
+        "appsink name=gui_sink emit-signals=true drop=true max-buffers=1 sync=false "
+        "camera_branch. ! queue name=cv_queue leaky=downstream max-size-buffers=2 "
+        "max-size-bytes=0 max-size-time=0 ! "
+        "appsink name=cv_sink emit-signals=true drop=true max-buffers=1 sync=false"
+    ).format(
+        sensor_id=args.sensor_id,
+        width=args.width,
+        height=args.height,
+        fps=args.fps,
+        flip_method=args.flip_method,
+    )
+
+
+def open_jetson_camera(args, frame_store=None):
+    pipeline = build_jetson_branched_pipeline(args)
+    print("Trying Jetson CSI camera path via branched GStreamer tee pipeline.")
+    print(f"GStreamer branch pipeline: {pipeline}")
+    try:
+        capture = BranchedGStreamerCapture(args, gui_frame_store=frame_store)
+    except Exception as exc:
+        print(f"Branched GStreamer camera path failed: {exc}")
+        return None, None
+    if capture.isOpened():
+        return capture, f"Jetson CSI sensor {args.sensor_id} via GStreamer tee"
+    capture.release()
+    return None, None
+
+
+def open_legacy_jetson_camera(args):
     pipeline = build_jetson_pipeline(
         args.sensor_id,
         args.width,
@@ -625,7 +868,7 @@ def open_jetson_camera(args):
         args.fps,
         args.flip_method,
     )
-    print("Trying Jetson CSI camera path via GStreamer.")
+    print("Trying legacy Jetson CSI camera path via single-sink GStreamer.")
     capture = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
     if capture.isOpened():
         return capture, f"Jetson CSI sensor {args.sensor_id}"
@@ -661,7 +904,7 @@ def open_mock_camera(args):
     return None, None
 
 
-def open_camera(args):
+def open_camera(args, frame_store=None):
     attempts = []
     if args.source == "auto":
         attempts = (open_jetson_camera, open_v4l2_camera)
@@ -673,7 +916,10 @@ def open_camera(args):
         attempts = (open_v4l2_camera,)
 
     for attempt in attempts:
-        capture, label = attempt(args)
+        if attempt is open_jetson_camera:
+            capture, label = attempt(args, frame_store)
+        else:
+            capture, label = attempt(args)
         if capture is not None:
             print(f"Camera opened successfully using {label}.")
             return capture, label
@@ -724,6 +970,19 @@ def webrtc_status_fields(webrtc_manager):
     return webrtc_manager.signal_fields()
 
 
+def branch_status_fields(capture):
+    if capture is None or not hasattr(capture, "branch_status_fields"):
+        return {}
+    return capture.branch_status_fields()
+
+
+def runtime_status_fields(capture, webrtc_manager):
+    fields = {}
+    fields.update(webrtc_status_fields(webrtc_manager))
+    fields.update(branch_status_fields(capture))
+    return fields
+
+
 def preview_loop(capture, first_frame, args, source_label, reporter, frame_store, webrtc_manager):
     print("Entering live preview. Press 'q' or Esc to exit.")
     emit_camera_status(
@@ -733,7 +992,7 @@ def preview_loop(capture, first_frame, args, source_label, reporter, frame_store
         source_label,
         frame=first_frame,
         camera_state="preview_start",
-        **webrtc_status_fields(webrtc_manager),
+        **runtime_status_fields(capture, webrtc_manager),
     )
     if frame_store is not None:
         frame_store.update(first_frame)
@@ -758,7 +1017,7 @@ def preview_loop(capture, first_frame, args, source_label, reporter, frame_store
                     frame=frame,
                     camera_state="preview_exit",
                     frame_count=frame_count,
-                    **webrtc_status_fields(webrtc_manager),
+                    **runtime_status_fields(capture, webrtc_manager),
                 )
                 return "user_exit"
 
@@ -780,7 +1039,7 @@ def preview_loop(capture, first_frame, args, source_label, reporter, frame_store
                     camera_state="stream_unstable",
                     frame_count=frame_count,
                     consecutive_failures=consecutive_failures,
-                    **webrtc_status_fields(webrtc_manager),
+                    **runtime_status_fields(capture, webrtc_manager),
                 )
                 return "stream_unstable"
             continue
@@ -801,7 +1060,7 @@ def preview_loop(capture, first_frame, args, source_label, reporter, frame_store
                 frame=frame,
                 camera_state="frame_limit_reached",
                 frame_count=frame_count,
-                **webrtc_status_fields(webrtc_manager),
+                **runtime_status_fields(capture, webrtc_manager),
             )
             return "frame_limit"
 
@@ -822,7 +1081,7 @@ def preview_loop(capture, first_frame, args, source_label, reporter, frame_store
                 camera_state="preview_running",
                 frame_count=frame_count,
                 fps=round(fps, 2),
-                **webrtc_status_fields(webrtc_manager),
+                **runtime_status_fields(capture, webrtc_manager),
             )
             last_status_time = now
 
@@ -863,7 +1122,7 @@ def main():
             source_label="pending",
             camera_state="startup",
         )
-        capture, source_label = open_camera(args)
+        capture, source_label = open_camera(args, frame_store)
         if capture is None:
             print("Camera could not be opened with the selected settings.")
             print(
@@ -926,7 +1185,7 @@ def main():
             source_label,
             frame=first_frame,
             camera_state="first_frame_ok",
-            **webrtc_status_fields(webrtc_manager),
+            **runtime_status_fields(capture, webrtc_manager),
         )
 
         if args.probe_only:
@@ -938,7 +1197,7 @@ def main():
                 source_label,
                 frame=first_frame,
                 camera_state="probe_complete",
-                **webrtc_status_fields(webrtc_manager),
+                **runtime_status_fields(capture, webrtc_manager),
             )
             return 0
 
@@ -958,7 +1217,7 @@ def main():
             source_label,
             frame=first_frame,
             camera_state=preview_result,
-            **webrtc_status_fields(webrtc_manager),
+            **runtime_status_fields(capture, webrtc_manager),
         )
         return 0
     except KeyboardInterrupt:

@@ -85,7 +85,21 @@ TCP protocol, but the actual video frames are sent through WebRTC. The Jetson
 also opens a raw TCP signaling port so the dashboard can return the browser's
 SDP answer without tunneling video through HTTP.
 
-WebRTC mode requires `aiortc` and `av` on the Jetson in addition to OpenCV:
+The Jetson CSI path now opens one GStreamer camera pipeline and branches it
+with `tee` into two appsinks:
+
+```text
+nvarguscamerasrc -> conversion -> tee
+  -> queue -> gui_sink -> WebRTC/dashboard
+  -> queue -> cv_sink  -> future computer vision input
+```
+
+WebRTC mode requires `aiortc` and `av` on the Jetson in addition to OpenCV.
+The branched camera path also requires GStreamer Python bindings:
+
+```bash
+sudo apt install python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0
+```
 
 ```bash
 python3 -m pip install aiortc av
@@ -104,6 +118,8 @@ What this does:
 - publishes a WebRTC offer to the dashboard over the existing packet protocol
 - waits for the dashboard/browser answer on the raw signaling port
 - sends the live camera frames through WebRTC once the peer connection forms
+- reports `gui_branch_frames`, `cv_branch_frames`, and `branch_health` so you
+  can confirm both GStreamer branches are receiving frames
 
 ## Hardware-Free Testing
 

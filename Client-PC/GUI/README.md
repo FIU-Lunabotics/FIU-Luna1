@@ -118,6 +118,8 @@ acts as a small signaling bridge:
 - the browser creates an SDP answer
 - the dashboard forwards that answer back to the Jetson over the signaling TCP port
 - the video itself flows over WebRTC media transport instead of HTTP
+- the Jetson status details include GStreamer branch counters so both the GUI
+  branch and future computer-vision branch can be verified
 
 Run the dashboard as usual:
 
