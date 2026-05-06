@@ -149,6 +149,12 @@ int escPin2 = 10;
 int liftPwmPin = 11;  // Lift actuator MD20A PWM input
 int tiltPwmPin = 12;  // Tilt actuator MD20A PWM input
 int vibrationPin = 3;  // PWM pin for vibration motor
+constexpr uint8_t HALL1_A = 22;
+constexpr uint8_t HALL1_B = 24;
+constexpr uint8_t HALL1_C = 26;
+constexpr uint8_t HALL2_A = 28;
+constexpr uint8_t HALL2_B = 30;
+constexpr uint8_t HALL2_C = 32;
 // int button1 = 2; removed these lines to establish
 // int button2 = 4;  (was 3, now used for vibration)
 // int button3 = 5;  (was 4)
@@ -161,12 +167,29 @@ constexpr bool BIDIRECTIONAL_ESC = true;
 constexpr byte joystickCenter = 128;
 constexpr byte joystickDeadband = 8;
 constexpr bool DEBUG_SERIAL = false;
+constexpr bool HALL_TELEMETRY_SERIAL = true;  // Serial is also the command link; enable only when something reads telemetry.
 constexpr unsigned long DEBUG_INTERVAL_MS = 1000;
+constexpr unsigned long HALL_TELEMETRY_INTERVAL_MS = 500;
 
 int escPulseMin = 1000;
 int escPulseNeutral = 1500;
-int escPulseMax = 2000;
+int escPulseMax = 1750;
 unsigned long lastDebugPrintMs = 0;
+unsigned long lastHallTelemetryPrintMs = 0;
+
+constexpr uint8_t POLE_PAIRS = 4;
+constexpr uint8_t HALL_TRANSITIONS_PER_REV = POLE_PAIRS * 6;
+constexpr uint32_t RPM_UPDATE_INTERVAL_MS = 500;
+
+uint32_t lastRpmCalcMs1 = 0;
+uint32_t hallPulseCount1 = 0;
+float currentRpm1 = 0.0f;
+int lastHallState1 = -1;
+
+uint32_t lastRpmCalcMs2 = 0;
+uint32_t hallPulseCount2 = 0;
+float currentRpm2 = 0.0f;
+int lastHallState2 = -1;
 
 constexpr int ACTUATOR_STOP = 0;
 constexpr int ACTUATOR_FORWARD = 1;
@@ -231,12 +254,114 @@ int directionFromButtons(bool forwardPressed, bool reversePressed, int forwardDi
   return forwardPressed ? forwardDirection : reverseDirection;
 }
 
+bool isValidHallState(int state) {
+  return state >= 1 && state <= 6;
+}
+
+int readHallState1() {
+  return (digitalRead(HALL1_A) << 2) |
+         (digitalRead(HALL1_B) << 1) |
+         digitalRead(HALL1_C);
+}
+
+int readHallState2() {
+  return (digitalRead(HALL2_A) << 2) |
+         (digitalRead(HALL2_B) << 1) |
+         digitalRead(HALL2_C);
+}
+
+void updateRpm1() {
+  const int state = readHallState1();
+  if (isValidHallState(state)) {
+    if (lastHallState1 == -1) {
+      lastHallState1 = state;
+    } else if (state != lastHallState1) {
+      hallPulseCount1++;
+      lastHallState1 = state;
+    }
+  }
+
+  const uint32_t now = millis();
+  if (now - lastRpmCalcMs1 >= RPM_UPDATE_INTERVAL_MS) {
+    const float elapsedSeconds = (now - lastRpmCalcMs1) / 1000.0f;
+    currentRpm1 = (hallPulseCount1 / static_cast<float>(HALL_TRANSITIONS_PER_REV)) *
+                  (60.0f / elapsedSeconds);
+    hallPulseCount1 = 0;
+    lastRpmCalcMs1 = now;
+  }
+}
+
+void updateRpm2() {
+  const int state = readHallState2();
+  if (isValidHallState(state)) {
+    if (lastHallState2 == -1) {
+      lastHallState2 = state;
+    } else if (state != lastHallState2) {
+      hallPulseCount2++;
+      lastHallState2 = state;
+    }
+  }
+
+  const uint32_t now = millis();
+  if (now - lastRpmCalcMs2 >= RPM_UPDATE_INTERVAL_MS) {
+    const float elapsedSeconds = (now - lastRpmCalcMs2) / 1000.0f;
+    currentRpm2 = (hallPulseCount2 / static_cast<float>(HALL_TRANSITIONS_PER_REV)) *
+                  (60.0f / elapsedSeconds);
+    hallPulseCount2 = 0;
+    lastRpmCalcMs2 = now;
+  }
+}
+
+void printHallSensorStates() {
+  const int hallState1 = readHallState1();
+  const int hallState2 = readHallState2();
+
+  Serial.print("Hall1: ");
+  Serial.print((hallState1 >> 2) & 0x01);
+  Serial.print(" ");
+  Serial.print((hallState1 >> 1) & 0x01);
+  Serial.print(" ");
+  Serial.print(hallState1 & 0x01);
+  Serial.print("  RPM1: ");
+  Serial.print(currentRpm1, 1);
+
+  Serial.print("  Hall2: ");
+  Serial.print((hallState2 >> 2) & 0x01);
+  Serial.print(" ");
+  Serial.print((hallState2 >> 1) & 0x01);
+  Serial.print(" ");
+  Serial.print(hallState2 & 0x01);
+  Serial.print("  RPM2: ");
+  Serial.print(currentRpm2, 1);
+}
+
+void printHallTelemetryIfEnabled() {
+  if (!HALL_TELEMETRY_SERIAL) {
+    return;
+  }
+
+  const unsigned long now = millis();
+  if (now - lastHallTelemetryPrintMs < HALL_TELEMETRY_INTERVAL_MS) {
+    return;
+  }
+
+  lastHallTelemetryPrintMs = now;
+  printHallSensorStates();
+  Serial.println();
+}
+
 void setup() {
   // pinMode(button1,INPUT);
   // pinMode(button2,INPUT);
   // pinMode(button3,INPUT);
   // pinMode(button4,INPUT);
   Serial.begin(9600);
+  pinMode(HALL1_A, INPUT_PULLUP);
+  pinMode(HALL1_B, INPUT_PULLUP);
+  pinMode(HALL1_C, INPUT_PULLUP);
+  pinMode(HALL2_A, INPUT_PULLUP);
+  pinMode(HALL2_B, INPUT_PULLUP);
+  pinMode(HALL2_C, INPUT_PULLUP);
   pinMode(liftPwmPin, OUTPUT);
   pinMode(tiltPwmPin, OUTPUT);
   pinMode(liftDirPin, OUTPUT);
@@ -253,12 +378,18 @@ void setup() {
   esc1.writeMicroseconds(escStopPulse());
   esc2.writeMicroseconds(escStopPulse());
   delay(2000);
+  lastRpmCalcMs1 = millis();
+  lastRpmCalcMs2 = millis();
   if (DEBUG_SERIAL) {
     Serial.println("ESC Ready");
   }
 }
 
 void loop() {
+  updateRpm1();
+  updateRpm2();
+  printHallTelemetryIfEnabled();
+
   if (Serial.available() >= PACKET_TOTAL_SIZE && controllerPacket.update() > 0) {
     int leftPulse = axisToPulse(controllerPacket.joy_left_y);
     int rightPulse = axisToPulse(controllerPacket.joy_right_y);
