@@ -214,6 +214,29 @@ constexpr uint8_t MD20A_FORWARD_DIR_LEVEL = LOW;
 constexpr uint8_t MD20A_REVERSE_DIR_LEVEL = HIGH;
 constexpr uint8_t MD20A_IDLE_DIR_LEVEL = LOW;
 
+constexpr int ACTUATOR_STOP = 0;
+constexpr int ACTUATOR_FORWARD = 1;
+constexpr int ACTUATOR_REVERSE = -1;
+
+// Note for how to use the MD20A PWM/DIR actuator (THIS IS FOR PROG TEAM):
+//   PWM LOW  = brake/stop, DIR ignored
+//   PWM HIGH + DIR LOW  = one motor direction
+//   PWM HIGH + DIR HIGH = opposite motor direction
+constexpr int LIFT_UP_DIRECTION = ACTUATOR_FORWARD;
+constexpr int LIFT_DOWN_DIRECTION = ACTUATOR_REVERSE;
+// Tilt direction was inverted in software so D-pad Up/Down matches physical tilt motion.
+constexpr int TILT_UP_DIRECTION = ACTUATOR_REVERSE;
+constexpr int TILT_DOWN_DIRECTION = ACTUATOR_FORWARD;
+
+// D-pad actuator commands (THIS IS FOR PROG TEAM):
+//   N/Up    -> lift box up
+//   S/Down  -> bring box down
+//   E/Right -> tilt actuator up
+//   W/Left  -> tilt actuator down
+constexpr uint8_t MD20A_FORWARD_DIR_LEVEL = LOW;
+constexpr uint8_t MD20A_REVERSE_DIR_LEVEL = HIGH;
+constexpr uint8_t MD20A_IDLE_DIR_LEVEL = LOW;
+
 int escStopPulse() {
   return BIDIRECTIONAL_ESC ? escPulseNeutral : escPulseMin;
 }
