@@ -90,11 +90,44 @@ server.
 | `--ui-host` | `127.0.0.1` | Host for the Dash UI |
 | `--ui-port` | `8050` | Port for the Dash UI |
 | `--forward-to` | empty | Optional real server target in `host:port` form |
+| `--state-url` | derived from `--forward-to` | Optional rover state endpoint URL |
 | `--max-packet-size` | `8192` | Protocol guard for payload size |
+| `--camera-one-label` | `Camera 1` | Label for the first camera panel |
+| `--camera-two-label` | `Camera 2` | Label for the second camera panel |
+| `--camera-one-url` | empty | Deprecated legacy HTTP camera URL override |
+| `--camera-two-url` | empty | Deprecated legacy HTTP camera URL override |
+| `--camera-one-source` | `jetson-camera-1` | Status source name shown under camera panel one |
+| `--camera-two-source` | `jetson-camera-2` | Status source name shown under camera panel two |
 
 ## What the UI shows
 
 - Controller stick, trigger, button, and d-pad state from `Client-PC`
 - Sequence number, packet size, CRC result, peer address, and forward status
 - Live Jetson status packets from `Client-Jetson`
+- Gabriel's newer Xbox-style main view and separate debug view toggle
+- Two camera display slots inside the existing controller dashboard view
+- Camera-health status details in the existing `Jetson Status` tab when the camera script reports them
 - Raw packet previews and connection logs for debugging
+
+## Camera Streaming
+
+The live camera panels now expect WebRTC instead of HTTP MJPEG. The dashboard
+acts as a small signaling bridge:
+
+- the Jetson camera script reports a WebRTC offer and its raw signaling target
+- the browser creates an SDP answer
+- the dashboard forwards that answer back to the Jetson over the signaling TCP port
+- the video itself flows over WebRTC media transport instead of HTTP
+- the Jetson status details include GStreamer branch counters so both the GUI
+  branch and future computer-vision branch can be verified
+
+Run the dashboard as usual:
+
+```bash
+python dashboard.py --listen-port 8090
+```
+
+Then run the Jetson camera script with `--serve-webrtc` and the matching
+`--report-source`, for example `jetson-camera-1`. Once the first frame and
+WebRTC offer arrive, the matching camera panel will negotiate the browser peer
+connection automatically.
