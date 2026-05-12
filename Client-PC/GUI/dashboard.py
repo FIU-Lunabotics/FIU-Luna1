@@ -1,19 +1,22 @@
 import argparse
 import json
 import os
+import re
 import socket
 import struct
+import subprocess
 import threading
 import time
 import urllib.error
 import urllib.request
 import zlib
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 
 import dash
 import dash_bootstrap_components as dbc
-from dash import dcc, html
+from dash import dcc, html, no_update
 from dash.dependencies import Input, Output, State
 from flask import jsonify, request
 from plotly import graph_objects as go
@@ -211,20 +214,489 @@ hall_state = {
     "invalid_lines": 0,
     "enabled": bool(CONFIG.hall_serial_port or CONFIG.hall_input_file),
 }
+selected_path = {
+    "pending": False,
+    "value": "",
+    "error": "",
+    "updated_at_ms": 0,
+}
+selected_path_lock = threading.Lock()
+
+LOG_FOLDER_PREFIX = "LunaLog"
+DEFAULT_LOG_ROOT = ""
+DATA_LOG_COLUMNS = [
+    "received_at_iso",
+    "received_at_ms",
+    "entry_type",
+    "source",
+    "peer",
+    "packet_ts",
+    "seq",
+    "crc_ok",
+    "forwarded",
+    "bytes",
+    "rover_mode",
+    "rover_state",
+    "rover_valid",
+    "requested_state",
+    "message",
+    "details",
+    "signal_kind",
+    "camera_state",
+    "webrtc_state",
+    "N",
+    "E",
+    "S",
+    "W",
+    "LB",
+    "RB",
+    "LS",
+    "RS",
+    "SELECT",
+    "START",
+    "LjoyX",
+    "LjoyY",
+    "RjoyX",
+    "RjoyY",
+    "LT",
+    "RT",
+    "dX",
+    "dY",
+    "payload_json",
+]
+DEBUG_LOG_COLUMNS = [
+    "logged_at_iso",
+    "logged_at_ms",
+    "category",
+    "level",
+    "message",
+]
+VIDEO_FRAME_COLUMNS = [
+    "captured_at_iso",
+    "captured_at_ms",
+    "source",
+    "media_time_s",
+    "presented_frames",
+    "width",
+    "height",
+]
 
 
-def log(message: str):
+def wall_clock_ms():
+    return int(time.time() * 1000)
+
+
+def iso_timestamp_from_ms(timestamp_ms):
+    return datetime.fromtimestamp(timestamp_ms / 1000.0).astimezone().isoformat(timespec="milliseconds")
+
+
+def clean_tsv_value(value):
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value).replace("\t", " ").replace("\r", " ").replace("\n", "\\n")
+
+
+def append_tsv_row(handle, columns, row):
+    handle.write("\t".join(clean_tsv_value(row.get(column, "")) for column in columns) + "\n")
+    handle.flush()
+
+
+def set_selected_path(*, pending=None, value=None, error=None):
+    with selected_path_lock:
+        if pending is not None:
+            selected_path["pending"] = pending
+        if value is not None:
+            selected_path["value"] = value
+        if error is not None:
+            selected_path["error"] = error
+        selected_path["updated_at_ms"] = wall_clock_ms()
+        return dict(selected_path)
+
+
+def get_selected_path_snapshot():
+    with selected_path_lock:
+        return dict(selected_path)
+
+
+def choose_log_directory_dialog():
+    initial_dir = get_selected_path_snapshot().get("value") or str(Path.home())
+    chosen_dir = ""
+    picker_errors = []
+
+    if os.name == "posix":
+        try:
+            result = subprocess.run(
+                [
+                    "zenity",
+                    "--file-selection",
+                    "--directory",
+                    "--title=Choose LunaLogs Output Folder",
+                    f"--filename={str(Path(initial_dir).expanduser())}/",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0:
+                chosen_dir = result.stdout.strip()
+            elif result.returncode not in {1, 5}:
+                stderr = result.stderr.strip() or "unknown zenity error"
+                picker_errors.append(f"zenity failed: {stderr}")
+        except Exception as exc:
+            picker_errors.append(f"zenity unavailable: {exc}")
+
+    if not chosen_dir and not picker_errors:
+        set_selected_path(pending=False, error="")
+        return
+
+    if not chosen_dir:
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            chosen_dir = filedialog.askdirectory(
+                title="Choose LunaLogs Output Folder",
+                initialdir=str(Path(initial_dir).expanduser()),
+                mustexist=False,
+            )
+            root.destroy()
+        except Exception as exc:
+            picker_errors.append(f"tkinter fallback failed: {exc}")
+
+    if chosen_dir:
+        set_selected_path(pending=False, value=chosen_dir, error="")
+    else:
+        error_message = " | ".join(picker_errors) if picker_errors else ""
+        set_selected_path(pending=False, error=error_message)
+
+
+def trigger_directory_dialog():
+    snapshot = get_selected_path_snapshot()
+    if snapshot.get("pending"):
+        return False, "Folder picker is already open."
+    set_selected_path(pending=True, error="")
+    thread = threading.Thread(target=choose_log_directory_dialog, daemon=True)
+    thread.start()
+    return True, "Opening native folder picker..."
+
+
+class DashboardLogManager:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.active = False
+        self.base_path = ""
+        self.session_id = ""
+        self.session_dir = ""
+        self.increment = 0
+        self.started_at_ms = 0
+        self.last_message = "Logging idle."
+        self.data_handle = None
+        self.debug_handle = None
+        self.video_handles = {}
+        self.frame_handles = {}
+        self.closing_video_sessions = {}
+        self.rover_signatures = {"rover_state": object(), "rover_request": object()}
+
+    def _next_increment(self, root: Path):
+        highest = 0
+        if root.exists():
+            for child in root.iterdir():
+                if not child.is_dir():
+                    continue
+                match = re.match(rf"{re.escape(LOG_FOLDER_PREFIX)}(\d+)-", child.name)
+                if match:
+                    highest = max(highest, int(match.group(1)))
+        return highest + 1
+
+    def _open_session(self, base_dir: Path, increment: int):
+        timestamp = datetime.now().astimezone().strftime("%m-%d-%Y-%H-%M-%S")
+        session_name = f"{LOG_FOLDER_PREFIX}{increment:03d}-{timestamp}"
+        session_dir = base_dir / session_name
+        session_dir.mkdir(parents=True, exist_ok=False)
+
+        data_handle = (session_dir / "data.tsv").open("w", encoding="utf-8", buffering=1)
+        debug_handle = (session_dir / "debug.tsv").open("w", encoding="utf-8", buffering=1)
+        append_tsv_row(data_handle, DATA_LOG_COLUMNS, {column: column for column in DATA_LOG_COLUMNS})
+        append_tsv_row(debug_handle, DEBUG_LOG_COLUMNS, {column: column for column in DEBUG_LOG_COLUMNS})
+
+        self.active = True
+        self.base_path = str(base_dir)
+        self.session_id = session_name
+        self.session_dir = str(session_dir)
+        self.increment = increment
+        self.started_at_ms = wall_clock_ms()
+        self.last_message = f"Logging to {session_name}"
+        self.data_handle = data_handle
+        self.debug_handle = debug_handle
+        self.video_handles = {}
+        self.frame_handles = {}
+        self.rover_signatures = {"rover_state": object(), "rover_request": object()}
+
+    def _close_handles(self):
+        for handle_name in ["data_handle", "debug_handle"]:
+            handle = getattr(self, handle_name)
+            if handle is not None:
+                try:
+                    handle.close()
+                except OSError:
+                    pass
+            setattr(self, handle_name, None)
+
+    def _cleanup_closing_sessions_locked(self):
+        now = time.time()
+        expired = [
+            session_id
+            for session_id, session in self.closing_video_sessions.items()
+            if session["expires_at"] <= now
+        ]
+        for session_id in expired:
+            session = self.closing_video_sessions.pop(session_id, None)
+            if not session:
+                continue
+            for handle in list(session["video_handles"].values()) + list(session["frame_handles"].values()):
+                try:
+                    handle.close()
+                except OSError:
+                    pass
+
+    def _move_active_video_handles_to_closing_locked(self, session_id, session_dir):
+        self._cleanup_closing_sessions_locked()
+        self.closing_video_sessions[session_id] = {
+            "session_dir": session_dir,
+            "video_handles": self.video_handles,
+            "frame_handles": self.frame_handles,
+            "expires_at": time.time() + 15.0,
+        }
+        self.video_handles = {}
+        self.frame_handles = {}
+
+    def _session_context_for_video_locked(self, session_id):
+        self._cleanup_closing_sessions_locked()
+        if self.active and session_id == self.session_id:
+            return {
+                "session_dir": self.session_dir,
+                "video_handles": self.video_handles,
+                "frame_handles": self.frame_handles,
+            }
+        closing = self.closing_video_sessions.get(session_id)
+        if closing is not None:
+            closing["expires_at"] = time.time() + 15.0
+        return closing
+
+    def snapshot(self):
+        with self.lock:
+            self._cleanup_closing_sessions_locked()
+            return {
+                "active": self.active,
+                "base_path": self.base_path,
+                "session_id": self.session_id,
+                "session_dir": self.session_dir,
+                "increment": self.increment,
+                "started_at_ms": self.started_at_ms,
+                "last_message": self.last_message,
+            }
+
+    def start(self, raw_base_path: str):
+        with self.lock:
+            self._cleanup_closing_sessions_locked()
+            if self.active:
+                return False, "Logging is already active."
+            cleaned_path = (raw_base_path or "").strip()
+            if not cleaned_path:
+                return False, "Choose a base output path before starting logging."
+            base_dir = Path(cleaned_path).expanduser()
+            base_dir.mkdir(parents=True, exist_ok=True)
+            increment = self._next_increment(base_dir)
+            self._open_session(base_dir, increment)
+        self.log_debug("logging", "info", "Logging started.")
+        return True, self.session_dir
+
+    def stop(self):
+        with self.lock:
+            self._cleanup_closing_sessions_locked()
+            if not self.active:
+                return False, "Logging is already stopped."
+            session_name = self.session_id
+            session_dir = self.session_dir
+            append_tsv_row(
+                self.debug_handle,
+                DEBUG_LOG_COLUMNS,
+                {
+                    "logged_at_iso": iso_timestamp_from_ms(wall_clock_ms()),
+                    "logged_at_ms": wall_clock_ms(),
+                    "category": "logging",
+                    "level": "info",
+                    "message": f"Logging stopping for {session_name}.",
+                },
+            )
+            self.last_message = f"Stopped logging for {session_name}"
+            self.active = False
+            self.session_id = ""
+            self.session_dir = session_dir
+            self.started_at_ms = 0
+            self._move_active_video_handles_to_closing_locked(session_name, session_dir)
+            self._close_handles()
+        return True, f"Stopped logging for {session_name}"
+
+    def increment_session(self, raw_base_path: str):
+        with self.lock:
+            self._cleanup_closing_sessions_locked()
+            cleaned_path = (raw_base_path or self.base_path or "").strip()
+            if not cleaned_path:
+                return False, "Choose a base output path before incrementing logging."
+            base_dir = Path(cleaned_path).expanduser()
+            base_dir.mkdir(parents=True, exist_ok=True)
+            previous_session = self.session_id if self.active else ""
+            if self.active:
+                session_dir = self.session_dir
+                append_tsv_row(
+                    self.debug_handle,
+                    DEBUG_LOG_COLUMNS,
+                    {
+                        "logged_at_iso": iso_timestamp_from_ms(wall_clock_ms()),
+                        "logged_at_ms": wall_clock_ms(),
+                        "category": "logging",
+                        "level": "info",
+                        "message": f"Increment requested for {self.session_id}.",
+                    },
+                )
+                self.last_message = f"Incrementing log from {self.session_id}"
+                self.active = False
+                self.session_id = ""
+                self.started_at_ms = 0
+                self._move_active_video_handles_to_closing_locked(previous_session, session_dir)
+                self._close_handles()
+            increment = self._next_increment(base_dir)
+            self._open_session(base_dir, increment)
+        if previous_session:
+            self.log_debug("logging", "info", f"Incremented logging from {previous_session}.")
+        else:
+            self.log_debug("logging", "info", "Logging started via increment.")
+        return True, self.session_dir
+
+    def log_data(self, row):
+        with self.lock:
+            if not self.active or self.data_handle is None:
+                return
+            append_tsv_row(self.data_handle, DATA_LOG_COLUMNS, row)
+
+    def log_debug(self, category, level, message):
+        timestamp_ms = wall_clock_ms()
+        with self.lock:
+            if not self.active or self.debug_handle is None:
+                return
+            append_tsv_row(
+                self.debug_handle,
+                DEBUG_LOG_COLUMNS,
+                {
+                    "logged_at_iso": iso_timestamp_from_ms(timestamp_ms),
+                    "logged_at_ms": timestamp_ms,
+                    "category": category,
+                    "level": level,
+                    "message": message,
+                },
+            )
+
+    def log_rover_snapshot(self, entry_type, snapshot, mode_label):
+        signature = json.dumps(snapshot, sort_keys=True, default=str) if snapshot is not None else "null"
+        with self.lock:
+            if not self.active or self.data_handle is None:
+                return
+            if self.rover_signatures.get(entry_type) == signature:
+                return
+            self.rover_signatures[entry_type] = signature
+            now_ms = wall_clock_ms()
+            append_tsv_row(
+                self.data_handle,
+                DATA_LOG_COLUMNS,
+                {
+                    "received_at_iso": iso_timestamp_from_ms(now_ms),
+                    "received_at_ms": now_ms,
+                    "entry_type": entry_type,
+                    "source": (snapshot or {}).get("source", "dashboard"),
+                    "packet_ts": (snapshot or {}).get("timestamp", ""),
+                    "seq": (snapshot or {}).get("seq", ""),
+                    "rover_mode": mode_label,
+                    "rover_state": (snapshot or {}).get("state", ""),
+                    "rover_valid": (snapshot or {}).get("valid", False),
+                    "requested_state": (snapshot or {}).get("state", "") if entry_type == "rover_request" else "",
+                    "payload_json": json.dumps(snapshot, sort_keys=True) if snapshot is not None else "",
+                },
+            )
+
+    def _video_paths_for_source(self, source, mime_type, session_dir):
+        slug = slugify_source(source)
+        extension = ".webm"
+        if mime_type and "mp4" in mime_type.lower():
+            extension = ".mp4"
+        video_path = Path(session_dir) / f"{slug}{extension}"
+        frames_path = Path(session_dir) / f"{slug}_frames.tsv"
+        return video_path, frames_path
+
+    def append_video_chunk(self, session_id, source, mime_type, chunk):
+        with self.lock:
+            context = self._session_context_for_video_locked(session_id)
+            if context is None:
+                return False, "Logging session is not active."
+            handle = context["video_handles"].get(source)
+            if handle is None:
+                video_path, _ = self._video_paths_for_source(source, mime_type, context["session_dir"])
+                handle = video_path.open("ab")
+                context["video_handles"][source] = handle
+            handle.write(chunk)
+            handle.flush()
+        return True, ""
+
+    def append_video_frames(self, session_id, source, frames):
+        with self.lock:
+            context = self._session_context_for_video_locked(session_id)
+            if context is None:
+                return False, "Logging session is not active."
+            handle = context["frame_handles"].get(source)
+            if handle is None:
+                _, frames_path = self._video_paths_for_source(source, "video/webm", context["session_dir"])
+                handle = frames_path.open("w", encoding="utf-8", buffering=1)
+                append_tsv_row(handle, VIDEO_FRAME_COLUMNS, {column: column for column in VIDEO_FRAME_COLUMNS})
+                context["frame_handles"][source] = handle
+            for frame in frames:
+                append_tsv_row(
+                    handle,
+                    VIDEO_FRAME_COLUMNS,
+                    {
+                        "captured_at_iso": iso_timestamp_from_ms(frame.get("captured_at_ms", wall_clock_ms())),
+                        "captured_at_ms": frame.get("captured_at_ms", ""),
+                        "source": source,
+                        "media_time_s": frame.get("media_time_s", ""),
+                        "presented_frames": frame.get("presented_frames", ""),
+                        "width": frame.get("width", ""),
+                        "height": frame.get("height", ""),
+                    },
+                )
+        return True, ""
+
+
+log_manager = DashboardLogManager()
+
+
+def log(message: str, category: str = "dashboard", level: str = "info"):
     timestamp = time.strftime("%H:%M:%S")
     line = f"[{timestamp}] {message}"
     with state_lock:
         log_lines.append(line)
+    log_manager.log_debug(category, level, message)
 
 
-def hall_log(message: str):
+def hall_log(message: str, category: str = "telemetry", level: str = "info"):
     timestamp = time.strftime("%H:%M:%S")
     line = f"[{timestamp}] {message}"
     with state_lock:
         hall_log_lines.appendleft(line)
+    log_manager.log_debug(category, level, message)
 
 
 def parse_target(target: str):
@@ -593,12 +1065,84 @@ def record_raw_packet(peer, total_len, packet_type, source, crc_ok, forwarded, p
     )
 
 
+def log_packet_row(
+    *,
+    entry_type,
+    source,
+    peer,
+    total_len,
+    packet_ts="",
+    seq="",
+    crc_ok=False,
+    forwarded=False,
+    rover_mode="",
+    rover_state="",
+    rover_valid="",
+    requested_state="",
+    message="",
+    details="",
+    signal_kind="",
+    camera_state="",
+    webrtc_state="",
+    controller_state=None,
+    payload_obj=None,
+):
+    timestamp_ms = wall_clock_ms()
+    row = {
+        "received_at_iso": iso_timestamp_from_ms(timestamp_ms),
+        "received_at_ms": timestamp_ms,
+        "entry_type": entry_type,
+        "source": source,
+        "peer": peer,
+        "packet_ts": packet_ts,
+        "seq": seq,
+        "crc_ok": crc_ok,
+        "forwarded": forwarded,
+        "bytes": total_len,
+        "rover_mode": rover_mode,
+        "rover_state": rover_state,
+        "rover_valid": rover_valid,
+        "requested_state": requested_state,
+        "message": message,
+        "details": details,
+        "signal_kind": signal_kind,
+        "camera_state": camera_state,
+        "webrtc_state": webrtc_state,
+        "payload_json": json.dumps(payload_obj, sort_keys=True) if payload_obj is not None else "",
+    }
+    if controller_state:
+        for key in [
+            "N",
+            "E",
+            "S",
+            "W",
+            "LB",
+            "RB",
+            "LS",
+            "RS",
+            "SELECT",
+            "START",
+            "LjoyX",
+            "LjoyY",
+            "RjoyX",
+            "RjoyY",
+            "LT",
+            "RT",
+            "dX",
+            "dY",
+        ]:
+            row[key] = controller_state.get(key, "")
+    log_manager.log_data(row)
+
+
 def update_state_from_packet(peer, total_len, packet, forwarded):
     payload, crc_ok = verify_packet(packet)
     packet_type = "unknown"
     source = peer
     now = time.time()
     log_message = None
+    log_category = "packets"
+    log_level = "info"
 
     with state_lock:
         metrics["packets_rx"] += 1
@@ -617,6 +1161,7 @@ def update_state_from_packet(peer, total_len, packet, forwarded):
             )
             record_raw_packet(peer, total_len, "crc_fail", source, False, forwarded, packet)
             log_message = f"CRC mismatch from {peer}"
+            log_level = "warning"
         else:
             try:
                 obj = json.loads(payload.decode("utf-8"))
@@ -634,6 +1179,7 @@ def update_state_from_packet(peer, total_len, packet, forwarded):
                 )
                 record_raw_packet(peer, total_len, "json_error", source, True, forwarded, packet)
                 log_message = f"JSON parse failed from {peer}: {exc}"
+                log_level = "warning"
             else:
                 if not isinstance(obj, dict):
                     metrics["json_failures"] += 1
@@ -649,6 +1195,7 @@ def update_state_from_packet(peer, total_len, packet, forwarded):
                     )
                     record_raw_packet(peer, total_len, "json_error", source, True, forwarded, packet)
                     log_message = f"Unexpected JSON payload type from {peer}"
+                    log_level = "warning"
                 elif obj.get("type") == "status":
                     packet_type = "status"
                     source = obj.get("source") or peer
@@ -717,6 +1264,20 @@ def update_state_from_packet(peer, total_len, packet, forwarded):
                     )
                     log_message = f"Status packet from {source}: {obj.get('message', '')}"
                     record_raw_packet(peer, total_len, packet_type, source, True, forwarded, packet)
+                    log_packet_row(
+                        entry_type=packet_type,
+                        source=source,
+                        peer=peer,
+                        total_len=total_len,
+                        packet_ts=obj.get("ts", ""),
+                        crc_ok=True,
+                        forwarded=forwarded,
+                        message=obj.get("message", ""),
+                        details=", ".join(details),
+                        camera_state=obj.get("camera_state", ""),
+                        webrtc_state=obj.get("webrtc_state", ""),
+                        payload_obj=obj,
+                    )
                 elif obj.get("type") == "camera_signal":
                     packet_type = "camera_signal"
                     source = obj.get("source") or peer
@@ -769,6 +1330,18 @@ def update_state_from_packet(peer, total_len, packet, forwarded):
                         f"Camera signal from {source}: {obj.get('signal_kind', 'unknown')}"
                     )
                     record_raw_packet(peer, total_len, packet_type, source, True, forwarded, packet)
+                    log_packet_row(
+                        entry_type=packet_type,
+                        source=source,
+                        peer=peer,
+                        total_len=total_len,
+                        packet_ts=obj.get("ts", ""),
+                        crc_ok=True,
+                        forwarded=forwarded,
+                        signal_kind=obj.get("signal_kind", ""),
+                        webrtc_state=obj.get("signal_kind", ""),
+                        payload_obj=obj,
+                    )
                 else:
                     packet_type = "controller"
                     source = obj.get("source") or peer
@@ -791,9 +1364,31 @@ def update_state_from_packet(peer, total_len, packet, forwarded):
                     )
                     update_state_combo_tracker(latest_controller_state, now)
                     record_raw_packet(peer, total_len, packet_type, source, True, forwarded, packet)
+                    log_packet_row(
+                        entry_type=packet_type,
+                        source=source,
+                        peer=peer,
+                        total_len=total_len,
+                        packet_ts=obj.get("ts", ""),
+                        seq=obj.get("seq", ""),
+                        crc_ok=True,
+                        forwarded=forwarded,
+                        controller_state=obj,
+                        payload_obj=obj,
+                    )
 
     if log_message:
-        log(log_message)
+        log(log_message, category=log_category, level=log_level)
+        if packet_type in {"crc_fail", "json_error"}:
+            log_packet_row(
+                entry_type=packet_type,
+                source=source,
+                peer=peer,
+                total_len=total_len,
+                crc_ok=crc_ok,
+                forwarded=forwarded,
+                message=log_message,
+            )
 
 
 def connection_thread(conn: socket.socket, addr):
@@ -1515,6 +2110,8 @@ app.layout = dbc.Container(
             className="dashboard-description",
         ),
         dcc.Store(id="controller-view", data="main"),
+        dcc.Store(id="log-base-path-store", data=DEFAULT_LOG_ROOT),
+        dcc.Interval(id="log-path-poll", interval=300, n_intervals=0, disabled=True),
         html.Div(id="status-bar"),
         dcc.Interval(id="tick", interval=max(16, CONFIG.ui_refresh_ms), n_intervals=0),
         dbc.Row(
@@ -1554,6 +2151,58 @@ app.layout = dbc.Container(
                     md=4,
                 ),
             ],
+            className="mb-3",
+        ),
+        dbc.Card(
+            dbc.CardBody(
+                [
+                    html.Div("Session Logging", style={"fontWeight": "bold", "marginBottom": "10px"}),
+                    dbc.Row(
+                        [
+                            dbc.Col(
+                                [
+                                    dbc.Label("Base Output Path", html_for="log-base-path"),
+                                    dbc.InputGroup(
+                                        [
+                                            dbc.Input(
+                                                id="log-base-path",
+                                                type="text",
+                                                value=DEFAULT_LOG_ROOT,
+                                                placeholder="Choose a parent folder for LunaLog sessions",
+                                            ),
+                                            dbc.Button("Choose Folder", id="btn-browse-log-path", color="info", n_clicks=0),
+                                        ]
+                                    ),
+                                    html.Div(
+                                        "Click Choose Folder to open your OS folder picker, then select the parent directory where LunaLog folders should be created.",
+                                        id="logging-help",
+                                        style={"fontFamily": "monospace", "fontSize": "12px", "marginTop": "8px"},
+                                    ),
+                                ],
+                                md=7,
+                            ),
+                            dbc.Col(
+                                [
+                                    dbc.ButtonGroup(
+                                        [
+                                            dbc.Button("Start Logging", id="btn-start-logging", color="success", n_clicks=0),
+                                            dbc.Button("Stop Logging", id="btn-stop-logging", color="danger", n_clicks=0),
+                                            dbc.Button("Start New Log Folder", id="btn-increment-log", color="warning", n_clicks=0),
+                                        ],
+                                        className="w-100",
+                                    ),
+                                    html.Div(
+                                        id="logging-status",
+                                        style={"fontFamily": "monospace", "marginTop": "12px"},
+                                    ),
+                                ],
+                                md=5,
+                            ),
+                        ],
+                        className="g-3 align-items-start",
+                    ),
+                ]
+            ),
             className="mb-3",
         ),
         dbc.Tabs(
@@ -1670,6 +2319,39 @@ def post_webrtc_answer(source):
     return jsonify({"ok": True, "source": source})
 
 
+@app.server.get("/api/logging/status")
+def get_logging_status():
+    return jsonify(log_manager.snapshot())
+
+
+@app.server.post("/api/logging/video_chunk/<path:source>")
+def post_video_chunk(source):
+    session_id = request.headers.get("X-Session-Id", "")
+    mime_type = request.headers.get("X-Video-Mime-Type", "video/webm")
+    chunk = request.get_data(cache=False, as_text=False)
+    if not chunk:
+        return jsonify({"ok": False, "error": "Missing video chunk."}), 400
+
+    ok, message = log_manager.append_video_chunk(session_id, source, mime_type, chunk)
+    if not ok:
+        return jsonify({"ok": False, "error": message}), 409
+    return jsonify({"ok": True, "source": source})
+
+
+@app.server.post("/api/logging/video_frames/<path:source>")
+def post_video_frames(source):
+    payload = request.get_json(silent=True) or {}
+    session_id = payload.get("session_id", "")
+    frames = payload.get("frames", [])
+    if not isinstance(frames, list):
+        return jsonify({"ok": False, "error": "Frames payload must be a list."}), 400
+
+    ok, message = log_manager.append_video_frames(session_id, source, frames)
+    if not ok:
+        return jsonify({"ok": False, "error": message}), 409
+    return jsonify({"ok": True, "source": source, "count": len(frames)})
+
+
 
 @app.callback(
     Output("controller-view-toggle", "style"),
@@ -1707,6 +2389,105 @@ def set_controller_view(_, __, current_view):
         "primary" if current_view == "debug" else "secondary",
         current_view != "main",
         current_view != "debug",
+    )
+
+
+@app.callback(
+    Output("log-path-poll", "disabled"),
+    Input("btn-browse-log-path", "n_clicks"),
+    prevent_initial_call=True,
+)
+def open_log_directory_picker(_):
+    ok, message = trigger_directory_dialog()
+    if not ok:
+        log(message, category="logging", level="warning")
+        return True
+    log(message, category="logging", level="info")
+    return False
+
+
+@app.callback(
+    Output("log-base-path", "value"),
+    Output("log-base-path-store", "data"),
+    Output("log-path-poll", "disabled", allow_duplicate=True),
+    Input("log-path-poll", "n_intervals"),
+    State("log-base-path", "value"),
+    State("log-base-path-store", "data"),
+    prevent_initial_call=True,
+)
+def sync_selected_log_directory(_, current_input, current_store):
+    snapshot = get_selected_path_snapshot()
+    if snapshot.get("pending"):
+        return no_update, no_update, False
+    if snapshot.get("error"):
+        if snapshot["error"]:
+            log(snapshot["error"], category="logging", level="warning")
+        set_selected_path(error="")
+        return no_update, no_update, True
+    if snapshot.get("value"):
+        chosen = snapshot["value"]
+        if chosen != current_input or chosen != current_store:
+            log(f"Selected logging folder: {chosen}", category="logging", level="info")
+        return chosen, chosen, True
+    return no_update, current_store or current_input or DEFAULT_LOG_ROOT, True
+
+
+@app.callback(
+    Output("log-base-path-store", "data", allow_duplicate=True),
+    Input("log-base-path", "value"),
+    prevent_initial_call=True,
+)
+def persist_manual_log_path(path_value):
+    return (path_value or "").strip() or DEFAULT_LOG_ROOT
+
+
+@app.callback(
+    Output("logging-status", "children"),
+    Output("btn-start-logging", "disabled"),
+    Output("btn-stop-logging", "disabled"),
+    Output("btn-increment-log", "disabled"),
+    Output("logging-help", "children"),
+    Input("tick", "n_intervals"),
+    Input("btn-start-logging", "n_clicks"),
+    Input("btn-stop-logging", "n_clicks"),
+    Input("btn-increment-log", "n_clicks"),
+    State("log-base-path-store", "data"),
+    State("log-base-path", "value"),
+)
+def update_logging_controls(_, __, ___, ____, stored_base_path, typed_base_path):
+    base_path = (stored_base_path or typed_base_path or DEFAULT_LOG_ROOT).strip()
+    message = ""
+    triggered = dash.ctx.triggered_id
+    if triggered == "btn-start-logging":
+        ok, message = log_manager.start(base_path)
+        if not ok:
+            log(message, category="logging", level="warning")
+    elif triggered == "btn-stop-logging":
+        ok, message = log_manager.stop()
+        if not ok:
+            log(message, category="logging", level="warning")
+    elif triggered == "btn-increment-log":
+        ok, message = log_manager.increment_session(base_path)
+        if not ok:
+            log(message, category="logging", level="warning")
+
+    snapshot = log_manager.snapshot()
+    status_line = (
+        f"active | folder={snapshot['session_dir']} | increment={snapshot['increment']:03d}"
+        if snapshot["active"]
+        else f"idle | last={snapshot['last_message']}"
+    )
+    if message and triggered in {"btn-start-logging", "btn-stop-logging", "btn-increment-log"}:
+        status_line = f"{status_line} | action={message}"
+    help_text = (
+        f"Timestamped folders are created under: {(base_path or '').strip() or DEFAULT_LOG_ROOT}"
+    )
+    return (
+        status_line,
+        snapshot["active"],
+        not snapshot["active"],
+        False,
+        help_text,
     )
 
 
@@ -1754,6 +2535,8 @@ def update_ui(_, active_tab, controller_view):
     rover_state = remote_rover_state or read_rover_state_file(ROVER_STATE_FILE)
     rover_request = remote_rover_request or read_rover_state_file(ROVER_STATE_REQUEST_FILE)
     mode = display_mode_label(rover_state, rover_request)
+    log_manager.log_rover_snapshot("rover_state", rover_state, mode)
+    log_manager.log_rover_snapshot("rover_request", rover_request, mode)
     forward_label = CONFIG.forward_to if CONFIG.forward_to else "disabled"
     combo_state = combo_info.get("status", "idle")
     requested_mode = combo_info.get("requested_mode", "")

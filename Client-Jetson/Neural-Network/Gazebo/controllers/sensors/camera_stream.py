@@ -78,6 +78,8 @@ DEFAULT_MAX_FAILURES = 5
 DEFAULT_REPORT_SOURCE = "jetson-camera"
 DEFAULT_SIGNAL_BIND_HOST = "0.0.0.0"
 DEFAULT_SIGNAL_PORT = 8081
+DEFAULT_CV_SHM_PATH = "/tmp/luna_camera_cv.sock"
+DEFAULT_CV_SHM_SIZE = 67108864
 WINDOW_TITLE = "Jetson Camera Preview"
 
 
@@ -260,6 +262,8 @@ class BranchedGStreamerCapture:
         self.pipeline = None
         self.bus = None
         self.last_error = ""
+        self.cv_shm_enabled = bool(getattr(args, "serve_cv_shm", False))
+        self.cv_shm_path = getattr(args, "cv_shm_path", DEFAULT_CV_SHM_PATH)
         self.branch_counts = {"gui": 0, "cv": 0}
         self.branch_last_update = {"gui": 0.0, "cv": 0.0}
         self.branch_dimensions = {
@@ -418,6 +422,8 @@ class BranchedGStreamerCapture:
                 "gui_branch_height": gui_height,
                 "cv_branch_width": cv_width,
                 "cv_branch_height": cv_height,
+                "cv_shm_enabled": self.cv_shm_enabled,
+                "cv_shm_path": self.cv_shm_path if self.cv_shm_enabled else "",
                 "branch_health": (
                     "both_active"
                     if self.branch_counts["gui"] > 0 and self.branch_counts["cv"] > 0
@@ -798,6 +804,22 @@ def parse_args():
         default="",
         help="Optional host/IP advertised in status packets for dashboard signaling.",
     )
+    parser.add_argument(
+        "--serve-cv-shm",
+        action="store_true",
+        help="Publish the CV GStreamer branch to a local shmsink for a separate CV process.",
+    )
+    parser.add_argument(
+        "--cv-shm-path",
+        default=DEFAULT_CV_SHM_PATH,
+        help="Local Unix socket path used by the CV branch shmsink.",
+    )
+    parser.add_argument(
+        "--cv-shm-size",
+        type=int,
+        default=DEFAULT_CV_SHM_SIZE,
+        help="Shared-memory buffer size in bytes for the CV branch shmsink.",
+    )
     return parser.parse_args()
 
 
@@ -821,6 +843,28 @@ def build_jetson_pipeline(sensor_id, width, height, fps, flip_method):
 
 
 def build_jetson_branched_pipeline(args):
+    serve_cv_shm = bool(getattr(args, "serve_cv_shm", False))
+    cv_shm_path = getattr(args, "cv_shm_path", DEFAULT_CV_SHM_PATH)
+    cv_shm_size = int(getattr(args, "cv_shm_size", DEFAULT_CV_SHM_SIZE))
+
+    cv_branch = (
+        "camera_branch. ! queue name=cv_queue leaky=downstream max-size-buffers=2 "
+        "max-size-bytes=0 max-size-time=0 ! "
+    )
+    if serve_cv_shm:
+        cv_branch += (
+            "tee name=cv_output "
+            "cv_output. ! queue name=cv_monitor_queue leaky=downstream max-size-buffers=2 "
+            "max-size-bytes=0 max-size-time=0 ! "
+            "appsink name=cv_sink emit-signals=true drop=true max-buffers=1 sync=false "
+            "cv_output. ! queue name=cv_shm_queue leaky=downstream max-size-buffers=2 "
+            "max-size-bytes=0 max-size-time=0 ! "
+            "shmsink name=cv_shm_sink socket-path={cv_shm_path} wait-for-connection=false "
+            "sync=false shm-size={cv_shm_size}"
+        ).format(cv_shm_path=cv_shm_path, cv_shm_size=cv_shm_size)
+    else:
+        cv_branch += "appsink name=cv_sink emit-signals=true drop=true max-buffers=1 sync=false"
+
     return (
         "nvarguscamerasrc sensor-id={sensor_id} ! "
         "video/x-raw(memory:NVMM), width=(int){width}, height=(int){height}, "
@@ -833,15 +877,14 @@ def build_jetson_branched_pipeline(args):
         "camera_branch. ! queue name=gui_queue leaky=downstream max-size-buffers=2 "
         "max-size-bytes=0 max-size-time=0 ! "
         "appsink name=gui_sink emit-signals=true drop=true max-buffers=1 sync=false "
-        "camera_branch. ! queue name=cv_queue leaky=downstream max-size-buffers=2 "
-        "max-size-bytes=0 max-size-time=0 ! "
-        "appsink name=cv_sink emit-signals=true drop=true max-buffers=1 sync=false"
+        "{cv_branch}"
     ).format(
         sensor_id=args.sensor_id,
         width=args.width,
         height=args.height,
         fps=args.fps,
         flip_method=args.flip_method,
+        cv_branch=cv_branch,
     )
 
 

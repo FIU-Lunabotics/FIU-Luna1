@@ -121,6 +121,47 @@ What this does:
 - reports `gui_branch_frames`, `cv_branch_frames`, and `branch_health` so you
   can confirm both GStreamer branches are receiving frames
 
+## Local CV Branch Frame Capture
+
+Issue #30 adds a ROS-free helper script that pulls frames from the local
+GStreamer CV branch. This is meant to become the camera input layer for
+computer vision later.
+
+Start the normal camera stream with `--serve-cv-shm` so the `cv_sink` branch is
+also published through a local GStreamer shared-memory socket:
+
+```bash
+python3 Neural-Network/Gazebo/controllers/sensors/camera_stream.py --source jetson --headless --serve-webrtc --serve-cv-shm --signal-bind-host 0.0.0.0 --signal-port 8081 --signal-public-host <jetson-ip> --report-to <dashboard-ip>:8090 --report-source jetson-camera-1
+```
+
+This keeps one process in charge of the physical camera. The GStreamer `tee`
+feeds the GUI/WebRTC branch and the local CV branch at the same time.
+
+The CV helper connects to that local branch and provides importable functions:
+
+```python
+from cv_branch_capture import retrieve_camera_stream, retrieve_single_frame_jpg
+
+stream = retrieve_camera_stream()
+frame_jpg = retrieve_single_frame_jpg(stream)
+```
+
+For a quick one-frame test on the Jetson while `camera_stream.py` is running:
+
+```bash
+python3 ComputerVision/cv_branch_capture.py --output cv_frame.jpg
+```
+
+To poll frames at a specific FPS for future neural-network input:
+
+```bash
+python3 ComputerVision/cv_branch_capture.py --poll-fps 5 --count 20 --output cv_frame.jpg
+```
+
+This does not create a network stream. It connects to the local GStreamer
+shared-memory branch and returns JPEG bytes that can be passed directly into the
+future computer-vision pipeline.
+
 ## Hardware-Free Testing
 
 If you want to test the camera script logic and dashboard plumbing on a machine
