@@ -1,4 +1,4 @@
-FROM arm64v8/ros:noetic-ros-base-focal
+FROM ros:noetic-ros-base-focal 
 
 # Prevent interactive prompts
 ENV DEBIAN_FRONTEND=noninteractive

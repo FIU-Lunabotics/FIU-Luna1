@@ -6,7 +6,7 @@ This directory contains the Dockerfile which allows you to automatically build a
 
 To build the docker image, navigate into the directory FIU-Luna1/Client-Jetson/Neural-Network/LIDAR and run the following command
 
-> docker build -t unilidar_point_lio .
+> docker build -t unitree_point_lio .
 
 This will build the image and save it to dockers filepath. 
 
