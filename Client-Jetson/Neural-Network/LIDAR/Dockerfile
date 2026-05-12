@@ -1,10 +1,9 @@
-FROM ros:noetic-ros-base-focal 
+FROM ros:noetic-ros-base-focal
 
-# Prevent interactive prompts
 ENV DEBIAN_FRONTEND=noninteractive
 SHELL ["/bin/bash", "-c"]
 
-# Install build tools and PCL / visualization deps
+# Install build tools, ROS deps, PCL, RViz, and debugging tools
 RUN apt-get update && apt-get install -y \
     build-essential \
     cmake \
@@ -18,55 +17,48 @@ RUN apt-get update && apt-get install -y \
     libeigen3-dev \
     usbutils \
     udev \
+    lsof \
     ros-noetic-eigen-conversions \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Noetic PCL and visualization messages
-RUN apt-get update && apt-get install -y \
     ros-noetic-pcl-ros \
     ros-noetic-pcl-conversions \
     ros-noetic-visualization-msgs \
-    && rm -rf /var/lib/apt/lists/*
-
-#Add Rviz without changing steps before to avoid having to rebuild those steps as they took a while
-RUN apt-get update && apt-get install -y \
     ros-noetic-rviz \
     ros-noetic-rqt \
     ros-noetic-rqt-common-plugins \
     && rm -rf /var/lib/apt/lists/*
 
-# Initialize rosdep
 RUN rosdep init || true
 RUN rosdep update
 
-# Create workspace
 WORKDIR /root/catkin_ws
-
 RUN mkdir -p /root/catkin_ws/src
 
-#ARG CLONE_VERSION=1
-
-# Clone Unitree SDK + Point-LIO (Noetic version)
+# Clone Unitree SDK2 for L2 + Point-LIO
 RUN cd /root/catkin_ws/src && \
-    git clone https://github.com/unitreerobotics/unilidar_sdk.git unilidar_sdk && \
+    git clone https://github.com/unitreerobotics/unilidar_sdk2.git unilidar_sdk2 && \
     mkdir -p catkin_point_lio_unilidar/src && \
     cd catkin_point_lio_unilidar/src && \
     git clone https://github.com/unitreerobotics/point_lio_unilidar.git point_lio_unilidar
 
-# Work around YAML_CPP in Unitree SDK if needed
-# RUN sed -i '/find_package(YAML_CPP REQUIRED)/s/^/#/' /root/catkin_ws/src/unilidar_sdk/CMakeLists.txt
+# Find and patch the SDK2 config file automatically
+RUN CONFIG_FILE="$(find /root/catkin_ws/src/unilidar_sdk2 -name config.yaml | head -n 1)" && \
+    echo "Using config file: $CONFIG_FILE" && \
+    sed -i 's|^initialize_type:.*|initialize_type: 1|' "$CONFIG_FILE" && \
+    sed -i 's|^port:.*|port: "/dev/unitree_lidar"|' "$CONFIG_FILE"
 
-#Build the toolchain
 
-RUN /bin/bash -c "source /opt/ros/noetic/setup.bash && \
-    cd /root/catkin_ws/src/unilidar_sdk/unitree_lidar_ros && \
+
+# Build Unitree SDK2 ROS driver and Point-LIO workspace
+RUN source /opt/ros/noetic/setup.bash && \
+    cd /root/catkin_ws/src/unilidar_sdk2/unitree_lidar_ros && \
     catkin_make && \
+    source devel/setup.bash && \
     cd /root/catkin_ws/src/catkin_point_lio_unilidar && \
-    catkin_make"
+    catkin_make
 
-# Add ROS + workspace setup to shell
+# Source ROS and both workspaces automatically
 RUN echo "source /opt/ros/noetic/setup.bash" >> /root/.bashrc && \
-    echo "source /root/catkin_ws/devel/setup.bash" >> /root/.bashrc
+    echo "source /root/catkin_ws/src/unilidar_sdk2/unitree_lidar_ros/devel/setup.bash" >> /root/.bashrc && \
+    echo "source /root/catkin_ws/src/catkin_point_lio_unilidar/devel/setup.bash" >> /root/.bashrc
 
-# Default command: give a shell where ROS is ready
 CMD ["/bin/bash"]
