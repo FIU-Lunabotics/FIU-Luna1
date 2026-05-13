@@ -1,7 +1,9 @@
 state_topic: "/luna/autonomy/state"
 command_topic: "/luna/rover/command_json"
+active_goal_topic: "/luna/autonomy/active_goal"
 start_topic: "/luna/autonomy/start"
 costmap_topic: "/luna/costmap"
+berm_center_topic: "/luna/berm/center"
 feedback_topic: "/luna/rover/feedback_json"
 bridge_connected_topic: "/luna/rover_bridge/connected"
 
@@ -10,9 +12,52 @@ bridge_connected_topic: "/luna/rover_bridge/connected"
 auto_start: true
 
 require_costmap: true
+require_berm: false
 require_bridge: false
 require_feedback: false
 
 topic_timeout_s: 2.0
 loop_rate_hz: 2.0
 recovery_delay_s: 1.0
+
+# Costmap target selection for EXPLORE.
+# OccupancyGrid convention: -1 unknown, 0 free, 100 occupied.
+unknown_is_unsafe: true
+obstacle_threshold: 50
+target_clearance_cells: 3
+safety_score_radius_cells: 5
+scan_stride_cells: 1
+
+# Higher forward weight prefers larger grid-y cells. Center weight keeps the
+# target away from the far left/right edges. Clearance weight prefers open space.
+forward_score_weight: 1.0
+center_score_weight: 0.1
+clearance_score_weight: 0.2
+
+# First-pass timed movement. Replace these with pose/move_base control later.
+movement_speed: 120
+movement_duration_s: 2.0
+travel_to_berm_speed: 120
+travel_to_berm_duration_s: 3.0
+
+# First-pass actuator sequences. Positive/negative signs depend on the rover
+# controller mapping and may need to be flipped during bench testing.
+dig_lower_duration_s: 1.5
+dig_scoop_duration_s: 2.0
+dig_raise_duration_s: 1.5
+dump_raise_duration_s: 1.5
+dump_release_duration_s: 2.0
+dump_reset_duration_s: 1.5
+
+linear_actuator_set_1_lower_command: -120
+linear_actuator_set_1_raise_command: 120
+linear_actuator_set_2_dig_command: 120
+linear_actuator_set_2_dump_command: 120
+linear_actuator_set_2_reset_command: -120
+vibration_motor_on_command: 1
+
+# Keep false until the rover feedback bridge publishes reliable limit switches.
+require_limit_switches: false
+
+# One dig/dump loop is safest for the first autonomous integration test.
+max_dig_dump_cycles: 1
