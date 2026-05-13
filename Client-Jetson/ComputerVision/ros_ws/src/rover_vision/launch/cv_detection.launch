@@ -1,0 +1,25 @@
+<launch>
+  <arg name="cv_code_dir" default="" />
+  <arg name="model_path" default="" />
+  <arg name="confidence" default="0.50" />
+  <arg name="timeout" default="2.0" />
+  <arg name="publish_rate" default="5.0" />
+
+  <arg name="socket_path" default="" />
+  <arg name="width" default="" />
+  <arg name="height" default="" />
+  <arg name="fps" default="" />
+
+  <node pkg="rover_vision" type="cv_detection_node.py" name="cv_detection_node" output="screen">
+    <param name="cv_code_dir" value="$(arg cv_code_dir)" />
+    <param name="model_path" value="$(arg model_path)" />
+    <param name="confidence" value="$(arg confidence)" />
+    <param name="timeout" value="$(arg timeout)" />
+    <param name="publish_rate" value="$(arg publish_rate)" />
+
+    <param name="socket_path" value="$(arg socket_path)" />
+    <param name="width" value="$(arg width)" />
+    <param name="height" value="$(arg height)" />
+    <param name="fps" value="$(arg fps)" />
+  </node>
+</launch>

@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>rover_vision</name>
+  <version>0.0.1</version>
+  <description>
+    ROS package for Lunabotics rover computer vision detections.
+    Publishes item type, confidence, and bounding box data from the CV model.
+  </description>
+
+  <maintainer email="degalex04@gmail.com">Degle Martinez</maintainer>
+  <license>TODO</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>rospy</depend>
+  <depend>std_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>image_transport</depend>
+
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>cv_bridge</exec_depend>
+  <exec_depend>image_transport</exec_depend>
+
+  <export>
+  </export>
+</package>
