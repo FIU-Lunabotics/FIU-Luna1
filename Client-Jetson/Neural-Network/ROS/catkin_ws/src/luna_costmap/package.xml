@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>luna_costmap</name>
+  <version>0.1.0</version>
+  <description>
+    ROS 1 Noetic costmap package for building a 2D occupancy grid from rover
+    point cloud data, with planned fusion of computer vision detections.
+  </description>
+
+  <maintainer email="noslen120860@gmail.com">Gabe0312</maintainer>
+  <author email="noslen120860@gmail.com">Gabe0312</author>
+
+  <license>Proprietary</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>rospy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+
+  <export>
+  </export>
+</package>

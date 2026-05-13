@@ -1,0 +1,9 @@
+<launch>
+  <rosparam command="load" file="$(find luna_costmap)/config/costmap.yaml" />
+
+  <node
+    pkg="luna_costmap"
+    type="costmap_node.py"
+    name="luna_costmap"
+    output="screen" />
+</launch>
