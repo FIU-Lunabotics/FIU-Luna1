@@ -1,0 +1,22 @@
+server_host: "127.0.0.1"
+server_port: 8080
+source: "ros-bridge"
+publish_rate: 2.0
+reconnect_delay_s: 3.0
+max_packet_size: 8192
+send_empty: true
+
+# Keep the outer packet type as "status" so the current Server-Pi stack accepts
+# and ignores these packets safely until issue #39 adds dedicated handling.
+packet_type: "status"
+message: "ros_bridge"
+
+string_topics:
+  - key: "berm_metadata"
+    name: "/luna/berm/metadata"
+  - key: "autonomy_state"
+    name: "/luna/autonomy/state"
+
+twist_topics:
+  - key: "cmd_vel"
+    name: "/cmd_vel"

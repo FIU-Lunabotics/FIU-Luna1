@@ -1,0 +1,27 @@
+frame_id: "map"
+center_topic: "/luna/berm/center"
+region_topic: "/luna/berm/region"
+metadata_topic: "/luna/berm/metadata"
+publish_rate: 1.0
+
+# Arena frame convention:
+# - origin is the southwest arena corner
+# - +x points east
+# - +y points north
+arena_width_m: 20.0
+arena_height_m: 20.0
+
+# Edit these over SSH at competition start.
+start_corner: "southwest"
+start_heading: "north"
+
+# Berm center measured from the configured start corner in the robot's
+# starting heading frame. Positive forward is where the rover initially faces;
+# positive left is the rover's left side at match start.
+berm_center_forward_m: 10.0
+berm_center_left_m: -10.0
+
+# Berm footprint dimensions in meters.
+berm_width_m: 2.0
+berm_length_m: 2.0
+berm_yaw_deg: 0.0

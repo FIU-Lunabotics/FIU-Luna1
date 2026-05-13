@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>luna_network_bridge</name>
+  <version>0.1.0</version>
+  <description>
+    ROS 1 Noetic bridge that sends selected ROS data through the FIU Luna1 TCP network protocol.
+  </description>
+
+  <maintainer email="noslen120860@gmail.com">Gabe0312</maintainer>
+  <author email="noslen120860@gmail.com">Gabe0312</author>
+
+  <license>Proprietary</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+  <depend>geometry_msgs</depend>
+  <depend>rospy</depend>
+  <depend>std_msgs</depend>
+
+  <export>
+  </export>
+</package>

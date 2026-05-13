@@ -1,0 +1,17 @@
+<launch>
+  <arg name="server_host" default="127.0.0.1" />
+  <arg name="server_port" default="8080" />
+  <arg name="source" default="ros-bridge" />
+
+  <rosparam command="load" file="$(find luna_network_bridge)/config/ros_network_bridge.yaml" />
+
+  <node
+    pkg="luna_network_bridge"
+    type="ros_network_bridge_node.py"
+    name="ros_network_bridge"
+    output="screen">
+    <param name="server_host" value="$(arg server_host)" />
+    <param name="server_port" value="$(arg server_port)" />
+    <param name="source" value="$(arg source)" />
+  </node>
+</launch>

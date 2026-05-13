@@ -1,0 +1,9 @@
+<launch>
+  <rosparam command="load" file="$(find luna_navigation)/config/berm_geometry.yaml" />
+
+  <node
+    pkg="luna_navigation"
+    type="berm_geometry_node.py"
+    name="berm_geometry"
+    output="screen" />
+</launch>
