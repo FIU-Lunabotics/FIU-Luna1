@@ -2,7 +2,7 @@
 set -e
 
 IMAGE_NAME="unitree_point_lio"
-CONTAINER_NAME="ros2"
+CONTAINER_NAME="ros1"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 ETH_IFACE="enp0s20f0u5u5c2"
@@ -34,5 +34,5 @@ docker run -it \
   -e LIBGL_ALWAYS_SOFTWARE=1 \
   -e XDG_RUNTIME_DIR=/tmp/runtime-root \
   -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
-  -v "$PROJECT_DIR:/root/project" \
+  -v "$PROJECT_DIR:/root/neural_network" \
   "$IMAGE_NAME"
