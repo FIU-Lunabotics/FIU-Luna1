@@ -1,0 +1,9 @@
+<launch>
+  <node
+    pkg="luna_autonomy"
+    type="autonomy_state_machine.py"
+    name="luna_autonomy_state_machine"
+    output="screen">
+    <rosparam command="load" file="$(find luna_autonomy)/config/autonomy.yaml" />
+  </node>
+</launch>

@@ -1,0 +1,18 @@
+state_topic: "/luna/autonomy/state"
+command_topic: "/luna/rover/command_json"
+start_topic: "/luna/autonomy/start"
+costmap_topic: "/luna/costmap"
+feedback_topic: "/luna/rover/feedback_json"
+bridge_connected_topic: "/luna/rover_bridge/connected"
+
+# Keep this true while testing so the state machine leaves IDLE by itself.
+# Set false later if you want to start autonomy through /luna/autonomy/start.
+auto_start: true
+
+require_costmap: true
+require_bridge: false
+require_feedback: false
+
+topic_timeout_s: 2.0
+loop_rate_hz: 2.0
+recovery_delay_s: 1.0
