@@ -1,4 +1,11 @@
 (function () {
+  const RECORDER_TIMESLICE_MS = 1000;
+  const FRAME_FLUSH_BATCH_SIZE = 30;
+  const MAX_FRAME_EVENTS = 300;
+  const FRAME_UPLOAD_RETRY_DELAY_MS = 2000;
+  const MAX_VIDEO_UPLOAD_QUEUE = 5;
+  const MAX_CONSECUTIVE_VIDEO_UPLOAD_FAILURES = 3;
+  const BACKPRESSURE_PAUSE_MS = 5000;
   const peers = new Map();
   let loggingState = {
     active: false,
@@ -75,19 +82,19 @@
     }
   }
 
-  async function uploadVideoChunk(entry, blob) {
-    if (!blob || !blob.size || !entry.recordingSessionId) {
+  async function uploadVideoChunk(entry, item) {
+    if (!item.blob || !item.blob.size || !item.sessionId) {
       return;
     }
 
     const response = await fetch(`/api/logging/video_chunk/${encodeURIComponent(entry.source)}`, {
       method: "POST",
       headers: {
-        "Content-Type": blob.type || "application/octet-stream",
-        "X-Session-Id": entry.recordingSessionId,
-        "X-Video-Mime-Type": entry.recordingMimeType || blob.type || "video/webm",
+        "Content-Type": item.blob.type || "application/octet-stream",
+        "X-Session-Id": item.sessionId,
+        "X-Video-Mime-Type": item.mimeType || item.blob.type || "video/webm",
       },
-      body: blob,
+      body: item.blob,
     });
 
     if (!response.ok) {
@@ -96,8 +103,74 @@
     }
   }
 
+  function pauseRecordingForBackpressure(entry, message, clearQueue) {
+    entry.recordingBackpressureUntil = Date.now() + BACKPRESSURE_PAUSE_MS;
+    updateState(entry.source, message);
+    if (clearQueue) {
+      entry.videoUploadQueue = [];
+    }
+    stopRecording(entry);
+  }
+
+  function processVideoUploadQueue(entry) {
+    if (entry.videoUploadInFlight || !entry.videoUploadQueue.length) {
+      return;
+    }
+
+    const item = entry.videoUploadQueue.shift();
+    entry.videoUploadInFlight = true;
+    uploadVideoChunk(entry, item)
+      .then(() => {
+        entry.videoUploadFailures = 0;
+      })
+      .catch((error) => {
+        entry.videoUploadFailures += 1;
+        console.warn(`Video upload failed for ${entry.source}`, error);
+        if (entry.videoUploadFailures >= MAX_CONSECUTIVE_VIDEO_UPLOAD_FAILURES) {
+          pauseRecordingForBackpressure(
+            entry,
+            "Recording paused because video chunks are not reaching the logger.",
+            true,
+          );
+        }
+      })
+      .finally(() => {
+        entry.videoUploadInFlight = false;
+        if (entry.videoUploadQueue.length) {
+          processVideoUploadQueue(entry);
+        }
+      });
+  }
+
+  function enqueueVideoChunk(entry, blob) {
+    if (!blob || !blob.size || !entry.recordingSessionId) {
+      return;
+    }
+
+    if (entry.videoUploadQueue.length >= MAX_VIDEO_UPLOAD_QUEUE) {
+      pauseRecordingForBackpressure(
+        entry,
+        "Recording paused because video upload is behind.",
+        false,
+      );
+      return;
+    }
+
+    entry.videoUploadQueue.push({
+      blob,
+      sessionId: entry.recordingSessionId,
+      mimeType: entry.recordingMimeType || blob.type || "video/webm",
+    });
+    processVideoUploadQueue(entry);
+  }
+
   async function flushFrameEvents(entry) {
-    if (!entry.frameEvents.length || !entry.recordingSessionId || entry.frameUploadInFlight) {
+    if (
+      !entry.frameEvents.length ||
+      !entry.recordingSessionId ||
+      entry.frameUploadInFlight ||
+      Date.now() < entry.nextFrameUploadAttemptAt
+    ) {
       return;
     }
 
@@ -117,8 +190,11 @@
         const body = await response.json().catch(() => ({}));
         throw new Error(body.error || `Frame timestamp upload failed (${response.status})`);
       }
+      entry.nextFrameUploadAttemptAt = 0;
     } catch (error) {
-      entry.frameEvents.unshift(...frames);
+      const requeued = frames.concat(entry.frameEvents);
+      entry.frameEvents = requeued.slice(-MAX_FRAME_EVENTS);
+      entry.nextFrameUploadAttemptAt = Date.now() + FRAME_UPLOAD_RETRY_DELAY_MS;
       throw error;
     } finally {
       entry.frameUploadInFlight = false;
@@ -144,7 +220,11 @@
         height: metadata.height,
       });
 
-      if (entry.frameEvents.length >= 30) {
+      if (entry.frameEvents.length > MAX_FRAME_EVENTS) {
+        entry.frameEvents.splice(0, entry.frameEvents.length - MAX_FRAME_EVENTS);
+      }
+
+      if (entry.frameEvents.length >= FRAME_FLUSH_BATCH_SIZE) {
         flushFrameEvents(entry).catch((error) => {
           console.warn(`Frame timestamp upload failed for ${entry.source}`, error);
         });
@@ -197,11 +277,11 @@
     entry.recordingMimeType = mimeType || recorder.mimeType || "video/webm";
     entry.frameEvents = [];
     entry.frameUploadInFlight = false;
+    entry.nextFrameUploadAttemptAt = 0;
+    entry.videoUploadFailures = 0;
 
     recorder.addEventListener("dataavailable", (event) => {
-      uploadVideoChunk(entry, event.data).catch((error) => {
-        console.warn(`Video upload failed for ${entry.source}`, error);
-      });
+      enqueueVideoChunk(entry, event.data);
     });
 
     recorder.addEventListener("stop", () => {
@@ -212,12 +292,10 @@
       entry.recordingActive = false;
       entry.recordingSessionId = "";
       entry.recordingMimeType = "";
-      if (loggingState.active) {
-        startRecording(entry);
-      }
+      syncRecording(entry);
     });
 
-    recorder.start(1000);
+    recorder.start(RECORDER_TIMESLICE_MS);
     scheduleFrameTracking(entry);
   }
 
@@ -231,6 +309,9 @@
     }
     if (entry.recorder && entry.recordingSessionId !== loggingState.session_id) {
       stopRecording(entry);
+      return;
+    }
+    if (Date.now() < entry.recordingBackpressureUntil) {
       return;
     }
     if (!entry.recorder) {
@@ -256,6 +337,11 @@
         recordingMimeType: "",
         frameEvents: [],
         frameUploadInFlight: false,
+        nextFrameUploadAttemptAt: 0,
+        videoUploadQueue: [],
+        videoUploadInFlight: false,
+        videoUploadFailures: 0,
+        recordingBackpressureUntil: 0,
       };
       peers.set(source, entry);
     } else {
