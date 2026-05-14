@@ -1,0 +1,34 @@
+# ResetMotor.srv
+#
+# This file defines a CUSTOM ROS SERVICE TYPE.
+# A service is used when one node wants to ASK another node to do something
+# and then WAIT for a response.
+#
+# In this example, another node (or the terminal using rosservice call)
+# can call a service such as:
+#   /motor/reset
+#
+# The request fields go ABOVE the ---
+# The response fields go BELOW the ---
+
+# =========================
+# REQUEST
+# =========================
+
+# Which motor should be reset.
+# This is useful if the same node manages multiple motors.
+int32 motor_id
+
+# Whether the reset operation should also clear fault flags.
+bool clear_faults
+
+---
+# =========================
+# RESPONSE
+# =========================
+
+# True if the reset operation succeeded.
+bool success
+
+# Human-readable explanation of what happened.
+string message
