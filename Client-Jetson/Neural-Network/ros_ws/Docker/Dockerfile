@@ -36,13 +36,6 @@ RUN mkdir -p /root/catkin_ws/src/catkin_point_lio_unilidar/src
 COPY Docker/Dependencies/unilidar_sdk2 /root/catkin_ws/src/unilidar_sdk2
 COPY Docker/Dependencies/point_lio_unilidar /root/catkin_ws/src/catkin_point_lio_unilidar/src/point_lio_unilidar
 
-RUN CONFIG_FILE="$(find /root/catkin_ws/src/unilidar_sdk2 -name config.yaml | head -n 1)" && \
-    echo "Using config file: $CONFIG_FILE" && \
-    sed -i 's|^initialize_type:.*|initialize_type: 2|' "$CONFIG_FILE" && \
-    sed -i 's|^lidar_ip:.*|lidar_ip: "192.168.1.62"|' "$CONFIG_FILE" && \
-    sed -i 's|^pc_ip:.*|pc_ip: "192.168.1.2"|' "$CONFIG_FILE" && \
-    sed -i 's|^lidar_port:.*|lidar_port: 6101|' "$CONFIG_FILE" && \
-    sed -i 's|^pc_port:.*|pc_port: 6201|' "$CONFIG_FILE"
 
 RUN source /opt/ros/noetic/setup.bash && \
     cd /root/catkin_ws/src/unilidar_sdk2/unitree_lidar_ros && \
