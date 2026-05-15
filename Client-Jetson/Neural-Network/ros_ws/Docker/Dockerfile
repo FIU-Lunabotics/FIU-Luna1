@@ -33,8 +33,8 @@ RUN rosdep update
 WORKDIR /root/catkin_ws
 RUN mkdir -p /root/catkin_ws/src/catkin_point_lio_unilidar/src
 
-COPY Docker/dependencies/unilidar_sdk2 /root/catkin_ws/src/unilidar_sdk2
-COPY Docker/dependencies/point_lio_unilidar /root/catkin_ws/src/catkin_point_lio_unilidar/src/point_lio_unilidar
+COPY Docker/Dependencies/unilidar_sdk2 /root/catkin_ws/src/unilidar_sdk2
+COPY Docker/Dependencies/point_lio_unilidar /root/catkin_ws/src/catkin_point_lio_unilidar/src/point_lio_unilidar
 
 RUN CONFIG_FILE="$(find /root/catkin_ws/src/unilidar_sdk2 -name config.yaml | head -n 1)" && \
     echo "Using config file: $CONFIG_FILE" && \
