@@ -1,0 +1,4 @@
+<launch>
+  <include file="$(find rover_lidar)/launch/lidar_backend.launch" />
+  <include file="$(find rover_lidar)/launch/point_lio.launch" />
+</launch>
