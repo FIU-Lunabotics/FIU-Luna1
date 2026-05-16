@@ -1,0 +1,19 @@
+# Topics
+state_topic: "/luna/autonomy/state"
+command_topic: "/luna/rover/command_json"
+active_goal_topic: "/luna/autonomy/active_goal"
+start_topic: "/luna/autonomy/start"
+costmap_topic: "/luna/costmap"
+
+# Speeds and Durations (Seconds)
+loop_rate_hz: 10.0
+movement_speed: 120
+travel_to_berm_speed: 120
+dig_lower_duration_s: 1.5
+dig_scoop_duration_s: 2.0
+
+# Actuator Commands
+linear_actuator_set_1_lower_command: -120
+linear_actuator_set_1_raise_command: 120
+linear_actuator_set_2_dig_command: 120
+vibration_motor_on_command: 1

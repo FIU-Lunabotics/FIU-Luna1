@@ -1,0 +1,6 @@
+# Request: True to turn autonomy ON, False to turn it OFF
+bool enable_autonomy
+---
+# Response: Confirmation that the state machine received the command
+bool success
+string message
