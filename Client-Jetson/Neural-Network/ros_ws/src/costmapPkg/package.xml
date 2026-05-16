@@ -2,12 +2,12 @@
 
 <!-- -->
 <package format="2">
-  <name>my_robot_pkg</name>
+  <name>costmapPkg</name>
   <version>0.1.0</version>
   <description>Custom ROS Noetic package for robot nodes and interfaces</description>
 
-  <maintainer email="you@example.com">Your Name</maintainer>
-  <license>MIT</license>
+  <maintainer email="noslen120860@gmail.com">Gabriel Rodriguez</maintainer>
+  <license>FIU</license>
 
 
 <!-- -->
@@ -17,8 +17,12 @@
   <depend>roscpp</depend>
   <depend>rospy</depend>
   <depend>std_msgs</depend>
+  <depend>sensor_msgs</depend>   <!-- Required for PointCloud2 -->
+  <depend>nav_msgs</depend>      <!-- Required for OccupancyGrid and MapMetaData -->
+  <depend>geometry_msgs</depend> <!-- Required for Pose -->
 
 <!-- -->
   <build_depend>message_generation</build_depend>
   <exec_depend>message_runtime</exec_depend>
+  <exec_depend>costmap_2d</exec_depend>
 </package>

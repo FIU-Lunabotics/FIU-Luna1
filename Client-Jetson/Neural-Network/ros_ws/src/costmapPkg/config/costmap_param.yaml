@@ -1,0 +1,40 @@
+# 1. Coordinate Frames
+global_frame: map             # The static frame of the environment
+robot_base_frame: base_link   # The center of your robot
+
+# 2. Timing
+update_frequency: 5.0         # How often (Hz) to recalculate the costmap
+publish_frequency: 5.0        # How often (Hz) to publish the map to the network
+
+# 3. Physical Robot Dimensions
+# Define the physical edges of your robot in meters (relative to base_link at 0,0).
+# Example below is for a 0.5m x 0.5m square chassis.
+footprint: [[-0.25, -0.25], [-0.25, 0.25], [0.25, 0.25], [0.25, -0.25]]
+# NOTE: If your robot is circular, comment out 'footprint' and use this instead:
+# robot_radius: 0.3 
+
+# 4. Plugins Architecture
+# We tell costmap_2d to load two layers: your custom map, and the safety buffer.
+plugins:
+  - {name: custom_grid_layer, type: "costmap_2d::StaticLayer"}
+  - {name: inflation_layer,   type: "costmap_2d::InflationLayer"}
+
+# --- PLUGIN CONFIGURATIONS ---
+
+# 5. Ingesting your Python Node's Output
+custom_grid_layer:
+  map_topic: /luna/costmap
+  # This is the magic setting: because your Python node continuously publishes new 
+  # grids from the LiDAR, this tells costmap_2d to constantly update the map instead
+  # of just reading it once at startup.
+  subscribe_to_updates: true 
+  lethal_cost_threshold: 99
+
+# 6. Safety Buffers (Inflation)
+inflation_layer:
+  # The absolute maximum distance to inflate obstacles. 
+  # Set this slightly larger than your robot_radius.
+  inflation_radius: 0.5 
+  # A mathematical weight that defines how steep the cost drop-off is 
+  # as you move away from the obstacle. 
+  cost_scaling_factor: 5.0

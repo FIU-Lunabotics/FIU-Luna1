@@ -1,43 +1,22 @@
 cmake_minimum_required(VERSION 3.0.2)
-project(my_robot_pkg)
+project(costmapPkg)
 
+# 1. Look for the build dependencies you defined in package.xml
 find_package(catkin REQUIRED COMPONENTS
-  roscpp
   rospy
   std_msgs
-  message_generation
+  sensor_msgs
+  nav_msgs
+  geometry_msgs
 )
 
-add_message_files(
-  FILES
-  Status.msg
-)
-
-add_service_files(
-  FILES
-  ResetPose.srv
-)
-
-generate_messages(
-  DEPENDENCIES
-  std_msgs
-)
-
+# 2. Export your dependencies to any other package that might rely on yours
 catkin_package(
-  CATKIN_DEPENDS roscpp rospy std_msgs message_runtime
-  INCLUDE_DIRS include
+  CATKIN_DEPENDS rospy std_msgs sensor_msgs nav_msgs geometry_msgs
 )
 
-include_directories(
-  include
-  ${catkin_INCLUDE_DIRS}
-)
-
-add_executable(controller_node src/controller_node.cpp)
-add_dependencies(controller_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
-target_link_libraries(controller_node ${catkin_LIBRARIES})
-
+# 3. Tell the compiler to install your Python script as an executable node
 catkin_install_python(PROGRAMS
-  scripts/teleop_node.py
+  scripts/costmap_controller.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
