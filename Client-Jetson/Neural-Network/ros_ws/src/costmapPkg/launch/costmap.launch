@@ -1,16 +1,8 @@
-<?xml version="1.0"?>
 <launch>
-  <!-- 1. Launch your custom Python Node from the scripts/ directory -->
-  <node pkg="costmapPkg" type="costmap_controller.py" name="luna_costmap" output="screen">
-    <!-- You can dynamically override your Python parameters here without editing the script -->
-    <param name="point_topic" value="/lidar/points" />
-    <param name="costmap_topic" value="/luna/costmap" />
-    <param name="resolution" value="0.10" />
-  </node>
-
-  <!-- 2. Launch the official ROS costmap_2d node -->
-  <node pkg="costmap_2d" type="costmap_2d_node" name="costmap_2d_node" output="screen">
-    <!-- This dynamically finds your package path and loads the YAML configuration -->
-    <rosparam file="$(find costmapPkg)/config/costmap_params.yaml" command="load" ns="costmap" />
+  <node pkg="costmapPkg"
+        type="costmap_controller.py"
+        name="luna_costmap"
+        output="screen">
+    <rosparam file="$(find costmapPkg)/config/costmap_param.yaml" command="load" />
   </node>
 </launch>

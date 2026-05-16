@@ -18,3 +18,8 @@ catkin_package(
 include_directories(
   ${catkin_INCLUDE_DIRS}
 )
+
+catkin_install_python(PROGRAMS
+  scripts/costmap_controller.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
