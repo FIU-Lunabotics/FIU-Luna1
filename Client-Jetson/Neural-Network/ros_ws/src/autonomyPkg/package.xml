@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>luna_autonomy</name>
+  <version>0.1.0</version>
+  <description>The overarching SMACH-based mission manager and state machine for the FIU-Luna1 Rover.</description>
+
+  <!-- Replace with your actual info -->
+  <maintainer email="noslen120860@gmail.com">Gabriel Rodriguez</maintainer>
+  <license>TODO</license>
+
+  <!-- The build tool -->
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <!-- Dependencies for generating our custom SetAutonomy Service -->
+  <build_depend>message_generation</build_depend>
+  <exec_depend>message_runtime</exec_depend>
+
+  <!-- Standard ROS and Math dependencies -->
+  <depend>rospy</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+
+  <!-- SMACH State Machine libraries -->
+  <depend>smach</depend>
+  <depend>smach_ros</depend>
+
+  <!-- Navigation stack action messages for the Travel states -->
+  <depend>move_base_msgs</depend>
+
+</package>

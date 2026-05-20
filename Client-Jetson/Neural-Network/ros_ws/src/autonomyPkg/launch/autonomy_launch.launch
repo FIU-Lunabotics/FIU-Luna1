@@ -1,0 +1,12 @@
+<launch>
+    <!-- Start the Mission Manager Node -->
+    <node pkg="state_machine_pkg" type="mission_manager_node.py" name="luna_autonomy_state_machine" output="screen">
+        
+        <!-- Load the variables from the YAML file directly into this node -->
+        <rosparam command="load" file="$(find state_machine_pkg)/config/arena_params.yaml" />
+        
+        <!-- Pass the starting corner as a parameter (can be overridden in the terminal) -->
+        <param name="starting_corner" value="A" />
+        
+    </node>
+</launch>

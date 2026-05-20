@@ -1,0 +1,18 @@
+point_topic: /unilidar/cloud
+costmap_topic: /luna/costmap
+
+publish_rate: 5.0
+
+resolution: 0.10
+width_m: 20.0
+height_m: 20.0
+origin_x: -10.0
+origin_y: -10.0
+
+min_obstacle_z: -0.20
+max_obstacle_z: 1.50
+
+occupied_cost: 100
+free_cost: 0
+
+costmap_frame: map

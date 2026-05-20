@@ -34,5 +34,5 @@ docker run -it \
   -e LIBGL_ALWAYS_SOFTWARE=1 \
   -e XDG_RUNTIME_DIR=/tmp/runtime-root \
   -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
-  -v "$PROJECT_DIR:/root/project" \
+  -v "$PROJECT_DIR:/root/neural_network" \
   "$IMAGE_NAME"
